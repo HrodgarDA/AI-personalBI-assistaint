@@ -1,2 +1,4 @@
-secrets/secrets.txt
-secrets/credentials.json
+secrets.txt
+credentials.json
+.env
+token.json
