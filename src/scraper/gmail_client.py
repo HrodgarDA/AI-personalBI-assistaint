@@ -1,119 +1,93 @@
 import os
 import base64
 import logging
+from datetime import datetime
 from typing import List, Optional, Dict
+from bs4 import BeautifulSoup
 
-from dotenv import load_dotenv
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-
-# Load environment variables (BANK_SENDER_EMAIL)
-load_dotenv()
+from google.auth.transport.requests import Request
 
 logger = logging.getLogger(__name__)
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-SCOPES = [os.getenv('PROJECT_SCOPE')]
 class GmailScraper:
-    """
-    Interface for Gmail API to search, fetch, and decode bank notification emails.
-    """
-
-    def __init__(self, credentials_path: str = 'credentials.json', token_path: str = 'token.json'):
-        self.credentials_path = credentials_path
-        self.token_path = token_path
+    def __init__(self):
         self.service = self._authenticate()
 
     def _authenticate(self):
-        """Handles OAuth2 flow and returns the Gmail service object."""
         creds = None
-        if os.path.exists(self.token_path):
-            creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
-            
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                logger.info("Refreshing expired Google token...")
                 creds.refresh(Request())
             else:
-                logger.info("Initiating new OAuth flow...")
-                flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                 creds = flow.run_local_server(port=0)
-                
-            with open(self.token_path, 'w') as token:
+            with open('token.json', 'w') as token:
                 token.write(creds.to_json())
-                
         return build('gmail', 'v1', credentials=creds)
 
-    def fetch_expense_emails(self, max_results: int = 10) -> List[Dict[str, str]]:
-        """
-        Searches for emails from the configured sender and extracts ID and text.
-        
-        Returns:
-            List[Dict]: A list of dictionaries like {"id": "msg_id", "body": "text_content"}
-        """
+    def fetch_expense_emails(self, max_results: int = 10, query_addon: str = "") -> List[Dict[str, str]]:
         target_email = os.getenv('BANK_SENDER_EMAIL')
-        if not target_email:
-            logger.error("BANK_SENDER_EMAIL is not set in the .env file.")
-            return []
-
-        query = f"from:{target_email}"
-        logger.info(f"Searching emails with query: '{query}'")
+        query = f"from:{target_email} {query_addon}".strip()
         
         try:
-            results = self.service.users().messages().list(
-                userId='me', 
-                q=query, 
-                maxResults=max_results
-            ).execute()
-            
+            results = self.service.users().messages().list(userId='me', q=query, maxResults=max_results).execute()
             messages = results.get('messages', [])
             extracted_data = []
 
             for msg in messages:
-                msg_id = msg['id']
-                # Fetch full message content
-                msg_data = self.service.users().messages().get(
-                    userId='me', 
-                    id=msg_id, 
-                    format='full'
-                ).execute()
+                m_id = msg['id']
+                m_data = self.service.users().messages().get(userId='me', id=m_id, format='full').execute()
                 
-                payload = msg_data.get('payload', {})
-                body_text = self._extract_text_from_payload(payload)
+                # Estrazione data/ora originale della mail (internalDate è in ms)
+                internal_date_ms = int(m_data.get('internalDate', 0))
+                email_datetime = datetime.fromtimestamp(internal_date_ms / 1000.0)
+                email_date = email_datetime.strftime('%Y-%m-%d')
+                email_time = email_datetime.strftime('%H:%M')
                 
-                if body_text:
-                    extracted_data.append({
-                        "id": msg_id,
-                        "body": body_text
-                    })
+                payload = m_data.get('payload', {})
+                raw_body = self._extract_text(payload)
+                
+                if raw_body:
+                    # Pulizia HTML: isoliamo solo il contenuto utile
+                    clean_body = self._clean_html(raw_body)
                     
+                    extracted_data.append({
+                        "id": m_id,
+                        "body": clean_body,
+                        "email_date": email_date,
+                        "email_time": email_time
+                    })
             return extracted_data
-            
         except Exception as e:
-            logger.error(f"An error occurred while fetching emails: {e}")
+            logger.error(f"Errore Gmail: {e}")
             return []
 
-    def _extract_text_from_payload(self, payload: dict) -> Optional[str]:
-        """
-        Recursively traverses the MIME tree to extract plain text or HTML content.
-        Decodes from base64url and handles UTF-8 conversion.
-        """
-        mime_type = payload.get('mimeType')
-        body = payload.get('body', {})
-        data = body.get('data')
+    def _clean_html(self, html_content: str) -> str:
+        """Estrae il testo dal div main-text eliminando il rumore dei disclaimer."""
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            main_div = soup.find('div', id='main-text')
+            if main_div:
+                # separator=' ' evita che le parole si attacchino dove c'erano i <br>
+                return main_div.get_text(separator=' ', strip=True)
+            # Fallback se la struttura cambia: prendi tutto ma limita i caratteri
+            return soup.get_text(separator=' ', strip=True)[:500]
+        except Exception:
+            return html_content[:500]
 
-        # Base case: we found a text part
-        if data and mime_type in ['text/plain', 'text/html']:
-            decoded_bytes = base64.urlsafe_b64decode(data)
-            return decoded_bytes.decode('utf-8', errors='replace')
-
-        # Recursive case: check nested parts (multipart emails)
+    def _extract_text(self, payload):
+        """Navigazione ricorsiva del payload MIME."""
         parts = payload.get('parts', [])
-        extracted_text = ""
+        data = payload.get('body', {}).get('data')
+        if data:
+            return base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
         for part in parts:
-            part_text = self._extract_text_from_payload(part)
-            if part_text:
-                extracted_text += part_text + "\n"
-                
-        return extracted_text.strip() if extracted_text else None
+            text = self._extract_text(part)
+            if text: return text
+        return None

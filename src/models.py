@@ -23,3 +23,4 @@ class ExpenseRecord(BaseModel):
 class ExpenseExtraction(BaseModel):
     """Contenitore per i risultati estratti dall'LLM."""
     expenses: List[ExpenseRecord]
+    
