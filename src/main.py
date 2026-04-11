@@ -32,6 +32,28 @@ def get_already_processed_ids(filepath: str, id_key: str = "id") -> set:
             except: pass
     return found_ids
 
+
+def get_latest_saved_datetime(filepath: str) -> datetime | None:
+    if not os.path.exists(filepath):
+        return None
+
+    latest_dt = None
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                item = json.loads(line)
+                email_date = item.get("email_date")
+                email_time = item.get("email_time")
+                if not email_date or not email_time:
+                    continue
+                current_dt = datetime.strptime(f"{email_date} {email_time}", "%Y-%m-%d %H:%M")
+                if latest_dt is None or current_dt > latest_dt:
+                    latest_dt = current_dt
+            except Exception:
+                continue
+    return latest_dt
+
+
 def save_to_silver(new_records):
     data = []
     if os.path.exists(SILVER_FILE):
@@ -52,17 +74,43 @@ def run_ingestion():
     logger.info("="*40)
     os.makedirs("data", exist_ok=True)
     
-    # Logica Data: Full Load 2025 vs Incremental 3gg
     force_full = os.getenv("FORCE_FULL_LOAD", "false").lower() == "true"
-    start_date = (datetime.now() - timedelta(days=3)).strftime('%Y/%m/%d')
-    max_limit = 50
-    logger.info(f"📈 MODALITÀ INCREMENTALE: Check dal {start_date}")
-    
+    max_limit = int(os.getenv("MAX_EMAILS", "1000000")) if force_full else int(os.getenv("MAX_EMAILS", "50"))
+    last_saved_dt = None if force_full else get_latest_saved_datetime(BRONZE_FILE)
+
+    if force_full:
+        logger.info("📈 FORCE_FULL_LOAD=true: scarico tutte le email disponibili.")
+        query_addon = ""
+    elif last_saved_dt:
+        logger.info(f"📈 Incrementale: scarico solo le email successive a {last_saved_dt.isoformat()}")
+        query_addon = f"after:{last_saved_dt.strftime('%Y/%m/%d')}"
+    else:
+        logger.info("📈 Nessun Bronze esistente: scarico tutte le email disponibili.")
+        query_addon = ""
+
     scraper = GmailScraper()
     existing_bronze_ids = get_already_processed_ids(BRONZE_FILE)
-    
-    raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=f"after:{start_date}")
-    new_emails = [e for e in raw_emails if e["id"] not in existing_bronze_ids]
+
+    raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=query_addon)
+    new_emails = []
+    for email in raw_emails:
+        if email["id"] in existing_bronze_ids:
+            continue
+
+        if last_saved_dt:
+            try:
+                email_dt = datetime.strptime(
+                    f"{email.get('email_date', '')} {email.get('email_time', '')}",
+                    "%Y-%m-%d %H:%M",
+                )
+                if email_dt <= last_saved_dt:
+                    continue
+            except Exception:
+                pass
+
+        new_emails.append(email)
+
+    new_emails.sort(key=lambda e: (e.get("email_date", ""), e.get("email_time", "")))
 
     if new_emails:
         logger.info(f"💾 Scrittura di {len(new_emails)} nuovi messaggi in Bronze...")

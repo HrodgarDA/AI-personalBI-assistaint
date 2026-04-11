@@ -89,7 +89,10 @@ class GmailScraper:
                 
                 logger.info(f"📦 Caricamento pagina successiva... (Totale parziale: {len(extracted_data)})")
                     
-            return extracted_data
+            return sorted(
+                extracted_data,
+                key=lambda e: (e.get("email_date", ""), e.get("email_time", ""))
+            )
         except Exception as e:
             logger.error(f"❌ Errore durante il fetching: {e}")
             return []
