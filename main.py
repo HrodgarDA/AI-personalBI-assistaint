@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import logging
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 BRONZE_FILE = "data/bronze_raw_emails.jsonl"
 SILVER_FILE = "data/silver_expenses.json"
+GOLD_FILE = "data/gold_certified_data.csv"
 
 # --- UTILS ---
 def get_already_processed_ids(filepath: str, id_key: str = "id") -> set:
@@ -66,6 +68,37 @@ def save_to_silver(new_records):
     
     with open(SILVER_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def run_certify():
+    logger.info("="*40)
+    logger.info("🏅 FASE: CERTIFY SILVER -> GOLD CSV")
+    logger.info("="*40)
+    if not os.path.exists(SILVER_FILE):
+        logger.error("❌ File Silver mancante. Esegui prima --process.")
+        return
+
+    with open(SILVER_FILE, 'r', encoding='utf-8') as f:
+        try:
+            records = json.load(f)
+        except Exception as e:
+            logger.error(f"❌ Impossibile leggere {SILVER_FILE}: {e}")
+            return
+
+    if not records:
+        logger.info("ℹ️ Nessun record presente in Silver. Nessun file CSV generato.")
+        return
+
+    os.makedirs("data", exist_ok=True)
+    fieldnames = sorted({key for record in records for key in record.keys()})
+
+    with open(GOLD_FILE, 'w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({k: record.get(k, "") for k in fieldnames})
+
+    logger.info(f"✅ CSV generato: {GOLD_FILE} ({len(records)} righe)")
 
 # --- CORE FASES ---
 def run_ingestion():
@@ -189,14 +222,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI-BI Expense ETL CLI")
     parser.add_argument("--ingest", action="store_true", help="Esegue lo scaricamento da Gmail")
     parser.add_argument("--process", action="store_true", help="Esegue il parsing LLM")
+    parser.add_argument("--certify", action="store_true", help="Converte il Silver JSON in gold_certified_data.csv")
     parser.add_argument("--batch", type=int, default=5, help="Dimensione batch processing")
     
     args = parser.parse_args()
 
-    if not args.ingest and not args.process:
+    if not args.ingest and not args.process and not args.certify:
         parser.print_help()
     else:
         if args.ingest:
             run_ingestion()
         if args.process:
             run_processing(batch_size=args.batch)
+        if args.certify:
+            run_certify()
