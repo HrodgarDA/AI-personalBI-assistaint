@@ -3,3 +3,7 @@ credentials.json
 .env
 token.json
 data/bronze_raw_emails.jsonl
+temp/insights.py
+.gitignore
+temp/test.py
+data/silver_expenses.json
