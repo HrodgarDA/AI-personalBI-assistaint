@@ -1,4 +1,4 @@
-# AI-BI-assistaint
+# AI-personal BI-assistaint
 Personal expenses tracker powered by AI
 
 ## 🚀 What it does now
