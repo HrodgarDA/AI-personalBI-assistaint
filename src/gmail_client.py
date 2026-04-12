@@ -73,10 +73,17 @@ class GmailScraper:
                     payload = m_data.get('payload', {})
                     raw_body = self._extract_text(payload)
                     
+                    subject = ""
+                    for header in payload.get('headers', []):
+                        if header.get('name', '').lower() == 'subject':
+                            subject = header.get('value', '')
+                            break
+                    
                     if raw_body:
                         clean_body = self._clean_html(raw_body)
                         extracted_data.append({
                             "id": m_id,
+                            "subject": subject,
                             "body": clean_body,
                             "email_date": email_date,
                             "email_time": email_time

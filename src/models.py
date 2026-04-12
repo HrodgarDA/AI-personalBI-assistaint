@@ -2,56 +2,39 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from enum import Enum
 
-class TransactionDirection(str, Enum):
-    """Direzione della transazione: entrata o uscita."""
-    Expense = "expense"
-    Income = "income"
+class Tipology(str, Enum):
+    """Transaction typology: Expense, Refund, or Salary."""
+    Expense = "Expense"
+    Refund = "Refund"
+    Salary = "Salary"
 
-class ExpenseCategory(str, Enum):
-    """Possibili categorie per classificare le transazioni bancarie."""
-    Abbonamenti = "Utenze e Abbonamenti mensili"
-    Casa = "Utenze e spese per la casa"
-    Svago = "Ristoranti e Tempo Libero"
-    Sport = "Sport, fitness e Benessere"
-    Trasporti = "Trasporti e Carburante"
-    Risparmi = "Risparmi e Investimenti"
-    Stipendio = "Stipendio"
-    Regali = "Regali"
-    Rimborsi = "Rimborsi e Condivisione"
-    Altro = "Altro"
+class TransactionCategory(str, Enum):
+    """Possible categories for classifying transactions."""
+    Subscriptions = "Utilities & Subscriptions"
+    Bills = "Bills for the house"
+    Entertainment = "Dining & Entertainment"
+    Shopping = "Shopping"
+    Health = "Health & Fitness"
+    Transport = "Transport & Fuel"
+    Supermarket = "Supermarket"
+    Savings = "Savings & Investments"
+    Refunds = "Refunds"
+    Salary = "Salary"
+    Gifts = "Gifts"
+    Transfers = "Transfers & Settlements"
+    Other = "Other"
 
-class ExpenseRecord(BaseModel):
-    """Schema per una singola transazione bancaria."""
-    direction: TransactionDirection = Field(..., description="Tipo di transazione: income o expense")
-    category: ExpenseCategory = Field(..., description="Categoria della transazione")
-    amount: float = Field(..., description="Importo speso o ricevuto (valore numerico)")
-    date: str = Field(..., description="Data della transazione trovata nell'email")
-    time: str = Field(..., description="Orario della transazione trovata nell'email")
-    confidence: float = Field(..., description="Livello di confidenza dell'estrazione (0-1)")
-    reasoning: str = Field(None, description="Motivazione o spiegazione dell'estrazione")
+class TransactionRecord(BaseModel):
+    """Schema for a single bank transaction (expense, refund, or salary)."""
+    tipology: Tipology = Field(..., description="Transaction type: Expense (negative), Refund (positive), or Salary (positive)")
+    merchant: str = Field(..., description="Merchant name")
+    category: TransactionCategory = Field(..., description="Transaction category")
+    amount: float = Field(..., description="Transaction amount. MUST be negative for Expense, and positive for Salary or Refund.")
+    date: str = Field(..., description="Transaction date found in the email")
+    time: str = Field(..., description="Transaction time found in the email")
+    confidence: float = Field(..., description="Extraction confidence level (0-1)")
+    reasoning: str = Field(None, description="Extraction reasoning, specifying the rationale behind the selected sign and category")
 
-class ExpenseExtraction(BaseModel):
-    """Contenitore per i risultati estratti dall'LLM."""
-    expenses: List[ExpenseRecord]
-
-class IncomeCategory(str, Enum):
-    """Possibili categorie di entrata per classificare i bonifici in entrata."""
-    Stipendio = "Stipendio"
-    Regali = "Regali"
-    Rimborsi = "Rimborsi"
-    Saldi = "Saldi con amici"
-    Altro = "Altro"
-
-class IncomeRecord(BaseModel):
-    """Schema per una singola entrata bancaria."""
-    category: IncomeCategory = Field(..., description="Categoria dell'entrata")
-    amount: float = Field(..., description="Importo ricevuto (valore numerico)")
-    date: str = Field(..., description="Data della transazione trovata nell'email")
-    time: str = Field(..., description="Orario della transazione trovata nell'email")
-    confidence: float = Field(..., description="Livello di confidenza dell'estrazione (0-1)")
-    reasoning: str = Field(None, description="Motivazione o spiegazione dell'estrazione")
-
-class IncomeExtraction(BaseModel):
-    """Contenitore per i risultati estratti per le entrate."""
-    incomes: List[IncomeRecord]
-    
+class TransactionExtraction(BaseModel):
+    """Container for LLM extracted results."""
+    transactions: List[TransactionRecord]

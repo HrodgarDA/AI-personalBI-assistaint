@@ -5,14 +5,6 @@ import plotly.graph_objects as go
 DATE_FORMAT = "%Y-%m-%d"
 
 # Define Theme Palettes
-LIGHT_THEME = {
-    "name": "light",
-    "bg_color": "rgba(0,0,0,0)",
-    "text_color": "#111827",
-    "grid_color": "#E5E7EB",
-    "palette": ["#4F46E5", "#10B981", "#F59E0B", "#EF4444", "#3B82F6", "#8B5CF6", "#EC4899", "#14B8A6"]
-}
-
 DARK_THEME = {
     "name": "dark",
     "bg_color": "rgba(0,0,0,0)",
@@ -21,8 +13,8 @@ DARK_THEME = {
     "palette": ["#818CF8", "#34D399", "#FBBF24", "#F87171", "#60A5FA", "#A78BFA", "#F472B6", "#2DD4BF"]
 }
 
-def get_theme(is_dark: bool):
-    return DARK_THEME if is_dark else LIGHT_THEME
+def get_theme():
+    return DARK_THEME
 
 def _parse_date(value: str):
     try:
@@ -30,9 +22,8 @@ def _parse_date(value: str):
     except (TypeError, ValueError):
         return None
 
-def _base_layout(title: str, theme: dict, xaxis_title=None, yaxis_title=None):
+def _base_layout(theme: dict, xaxis_title=None, yaxis_title=None):
     return go.Layout(
-        title=dict(text=title, font=dict(color=theme["text_color"], size=18, family="Inter, sans-serif")),
         paper_bgcolor=theme["bg_color"],
         plot_bgcolor=theme["bg_color"],
         font=dict(color=theme["text_color"], family="Inter, sans-serif"),
@@ -40,20 +31,21 @@ def _base_layout(title: str, theme: dict, xaxis_title=None, yaxis_title=None):
             title=xaxis_title, 
             gridcolor=theme["grid_color"], 
             zerolinecolor=theme["grid_color"],
-            color=theme["text_color"]
+            color=theme["text_color"],
+            automargin=True
         ),
         yaxis=dict(
             title=yaxis_title, 
             gridcolor=theme["grid_color"], 
             zerolinecolor=theme["grid_color"],
-            color=theme["text_color"]
+            color=theme["text_color"],
+            automargin=True
         ),
-        margin=dict(l=40, r=40, t=60, b=40),
-        hoverlabel=dict(bgcolor=theme["text_color"], font_color=theme["bg_color"]),
+        margin=dict(l=40, r=40, t=80, b=80)
     )
 
-def plot_category_totals(data, is_dark=False):
-    theme = get_theme(is_dark)
+def plot_category_totals(data):
+    theme = get_theme()
     totals = defaultdict(float)
     for row in data:
         amount = row.get("amount")
@@ -80,15 +72,17 @@ def plot_category_totals(data, is_dark=False):
         )
     )
     
+    max_val = max(values) if values else 100
     fig.update_layout(
-        _base_layout("Total Amount by Category", theme, yaxis_title="Amount (€)"),
-        xaxis_tickangle=-45,
+        _base_layout(theme, yaxis_title="Amount (€)"),
+        xaxis_tickangle=-30,
+        yaxis=dict(range=[0, max_val * 1.2])  # 20% headroom
     )
     return fig
 
 
-def plot_category_pie(data, is_dark=False):
-    theme = get_theme(is_dark)
+def plot_category_pie(data):
+    theme = get_theme()
     totals = defaultdict(float)
     for row in data:
         amount = row.get("amount")
@@ -106,44 +100,83 @@ def plot_category_pie(data, is_dark=False):
             labels=labels, 
             values=values, 
             textinfo="percent+label",
+            textposition="outside",
             marker=dict(colors=theme["palette"], line=dict(color=theme["bg_color"], width=2)),
             hovertemplate="<b>%{label}</b><br>Amount: %{value:.2f} €<br>Percentage: %{percent}<extra></extra>"
         )
     )
     
-    fig.update_layout(_base_layout("Distribution by Category", theme))
-    fig.update_traces(hole=.4, hoverinfo="label+percent+name") # Donut chart for premium look
+    fig.update_layout(_base_layout(theme), height=600)
+    fig.update_traces(hole=.4, hoverinfo="label+percent+name")
     return fig
 
 
-def plot_amount_over_time(data, is_dark=False):
-    theme = get_theme(is_dark)
-    daily = defaultdict(float)
+def plot_amount_over_time(data, freq="D"):
+    theme = get_theme()
+    daily_salary = defaultdict(float)
+    daily_expenses = defaultdict(float)
+    import datetime
+    
     for row in data:
         amount = row.get("amount")
+        tipology = row.get("tipology", row.get("direction"))  # fallback for old data
         date_value = row.get("date")
         parsed = _parse_date(date_value)
         if parsed and isinstance(amount, (int, float)):
-            daily[parsed] += amount
+            if freq == "W":
+                parsed = parsed - datetime.timedelta(days=parsed.weekday())
+            elif freq == "M":
+                parsed = parsed.replace(day=1)
+                
+            if tipology == "Salary":
+                daily_salary[parsed] += amount
+            elif tipology in ["Expense", "Refund"] or tipology == "expense":
+                daily_expenses[parsed] += amount
+            else:
+                daily_expenses[parsed] += amount
 
-    if not daily:
-        return go.Figure(layout=_base_layout("No data available", theme))
+    all_dates = sorted(set(list(daily_salary.keys()) + list(daily_expenses.keys())))
 
-    dates = sorted(daily)
-    values = [float(daily[date]) for date in dates]
+    if not all_dates:
+        return go.Figure(layout=_base_layout(theme))
 
-    fig = go.Figure(
-        data=go.Scatter(
-            x=dates, 
-            y=values, 
+    if freq == "W":
+        x_labels = [d.strftime("%Y-W%W") for d in all_dates]
+    elif freq == "M":
+        x_labels = [d.strftime("%B %Y") for d in all_dates]
+    else:
+        x_labels = all_dates
+
+    y_salary = [float(daily_salary.get(d, 0.0)) for d in all_dates]
+    y_expenses = [float(daily_expenses.get(d, 0.0)) for d in all_dates]
+
+    fig = go.Figure()
+    
+    has_salary = any(y > 0 for y in y_salary)
+    
+    if has_salary:
+        fig.add_trace(go.Scatter(
+            x=x_labels, 
+            y=y_salary, 
+            name="Salary",
             mode="lines+markers", 
             line=dict(color=theme["palette"][1], width=3, shape='spline'),
             marker=dict(size=8, color=theme["palette"][1], line=dict(width=1, color=theme["bg_color"])),
-            fill='tozeroy',
-            fillcolor=theme["palette"][1].replace(")", ", 0.1)").replace("HEX", ""), # rudimentary opacity logic
-            hovertemplate="<b>%{x}</b><br>Amount: %{y:.2f} €<extra></extra>"
-        )
-    )
+            hovertemplate="<b>%{x}</b><br>Salary: %{y:.2f} €<extra></extra>"
+        ))
+        
+    fig.add_trace(go.Scatter(
+        x=x_labels, 
+        y=y_expenses, 
+        name="Expenses",
+        mode="lines+markers", 
+        line=dict(color=theme["palette"][3], width=3, shape='spline'), # Red for expenses
+        marker=dict(size=8, color=theme["palette"][3], line=dict(width=1, color=theme["bg_color"])),
+        hovertemplate="<b>%{x}</b><br>Expenses: %{y:.2f} €<extra></extra>"
+    ))
     
-    fig.update_layout(_base_layout("Total Amount over Time", theme, xaxis_title="Date", yaxis_title="Amount (€)"))
+    fig.update_layout(
+        _base_layout(theme, xaxis_title="Date", yaxis_title="Amount (€)"),
+        hovermode="x unified"
+    )
     return fig

@@ -5,7 +5,7 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from src.gmail_client import GmailScraper
-from src.extractor import ExpenseParser
+from src.extractor import TransactionParser
 from src.prompts import EMAIL_PROMPT_TEMPLATE
 
 # Logging Setup
@@ -72,21 +72,21 @@ def save_to_silver(new_records):
 
 def run_certify():
     logger.info("="*40)
-    logger.info("🏅 FASE: CERTIFY SILVER -> GOLD CSV")
+    logger.info("🏅 PHASE: CERTIFY SILVER -> GOLD CSV")
     logger.info("="*40)
     if not os.path.exists(SILVER_FILE):
-        logger.error("❌ File Silver mancante. Esegui prima --process.")
+        logger.error("❌ Silver file missing. Run --process first.")
         return
 
     with open(SILVER_FILE, 'r', encoding='utf-8') as f:
         try:
             records = json.load(f)
         except Exception as e:
-            logger.error(f"❌ Impossibile leggere {SILVER_FILE}: {e}")
+            logger.error(f"❌ Cannot read {SILVER_FILE}: {e}")
             return
 
     if not records:
-        logger.info("ℹ️ Nessun record presente in Silver. Nessun file CSV generato.")
+        logger.info("ℹ️ No records in Silver table. No CSV generated.")
         return
 
     os.makedirs("data", exist_ok=True)
@@ -98,12 +98,12 @@ def run_certify():
         for record in records:
             writer.writerow({k: record.get(k, "") for k in fieldnames})
 
-    logger.info(f"✅ CSV generato: {GOLD_FILE} ({len(records)} righe)")
+    logger.info(f"✅ CSV Generated: {GOLD_FILE} ({len(records)} rows)")
 
 # --- CORE FASES ---
 def run_ingestion():
     logger.info("="*40)
-    logger.info("📥 FASE: GMAIL INGESTION")
+    logger.info("📥 PHASE: GMAIL INGESTION")
     logger.info("="*40)
     os.makedirs("data", exist_ok=True)
     
@@ -112,13 +112,13 @@ def run_ingestion():
     last_saved_dt = None if force_full else get_latest_saved_datetime(BRONZE_FILE)
 
     if force_full:
-        logger.info("📈 FORCE_FULL_LOAD=true: scarico tutte le email disponibili.")
+        logger.info("📈 FORCE_FULL_LOAD=true: downloading all available emails.")
         query_addon = ""
     elif last_saved_dt:
-        logger.info(f"📈 Incrementale: scarico solo le email successive a {last_saved_dt.isoformat()}")
+        logger.info(f"📈 Incremental logic: fetching emails after {last_saved_dt.isoformat()}")
         query_addon = f"after:{last_saved_dt.strftime('%Y/%m/%d')}"
     else:
-        logger.info("📈 Nessun Bronze esistente: scarico tutte le email disponibili.")
+        logger.info("📈 No Bronze file found: downloading all available emails.")
         query_addon = ""
 
     scraper = GmailScraper()
@@ -146,40 +146,38 @@ def run_ingestion():
     new_emails.sort(key=lambda e: (e.get("email_date", ""), e.get("email_time", "")))
 
     if new_emails:
-        logger.info(f"💾 Scrittura di {len(new_emails)} nuovi messaggi in Bronze...")
+        logger.info(f"💾 Writing {len(new_emails)} new messages to Bronze layer...")
         with open(BRONZE_FILE, "a", encoding="utf-8") as b_f:
             for m in new_emails:
                 b_f.write(json.dumps(m, ensure_ascii=False) + "\n")
-        logger.info("✅ Ingestion completata con successo.")
+        logger.info("✅ Ingestion completed successfully.")
     else:
-        logger.info("✅ Nessun dato nuovo trovato rispetto al Bronze locale.")
+        logger.info("✅ No new emails found compared to local Bronze.")
 
 def run_processing(batch_size: int = 5):
     logger.info("="*40)
-    logger.info("🧠 FASE: LLM PROCESSING")
+    logger.info("🧠 PHASE: LLM PROCESSING")
     logger.info("="*40)
     
     if not os.path.exists(BRONZE_FILE):
-        logger.error("❌ File Bronze mancante. Esegui prima --ingest.")
+        logger.error("❌ Bronze file missing. Run --ingest first.")
         return
 
-    # Leggi tutti i dati grezzi
     all_raw = []
     with open(BRONZE_FILE, "r", encoding="utf-8") as f:
         for line in f:
             try: all_raw.append(json.loads(line))
             except: continue
     
-    # Filtra ciò che è già finito nel Silver
     processed_silver_ids = get_already_processed_ids(SILVER_FILE)
     to_process = [m for m in all_raw if m["id"] not in processed_silver_ids]
 
     if not to_process:
-        logger.info("✅ Silver Layer già sincronizzato. Nulla da processare.")
+        logger.info("✅ Silver Layer already synced. Nothing to process.")
         return
 
-    logger.info(f"🚀 Inizio parsing di {len(to_process)} email.")
-    parser = ExpenseParser()
+    logger.info(f"🚀 Starting to parse {len(to_process)} emails.")
+    parser = TransactionParser()
     total_extracted = 0
 
     for i in range(0, len(to_process), batch_size):
@@ -189,15 +187,15 @@ def run_processing(batch_size: int = 5):
 
         for email in batch:
             try:
-                # Prompt arricchito con data e orario della mail
                 prompt = EMAIL_PROMPT_TEMPLATE.format(
                     date=email.get('email_date', ''),
                     time=email.get('email_time', ''),
+                    subject=email.get('subject', ''),
                     body=email.get('body', ''),
                 )
                 res = parser.parse(prompt)
 
-                for exp in res.expenses:
+                for exp in res.transactions:
                     if not exp.time:
                         exp.time = email['email_time']
                     if not getattr(exp, 'date', None) and email.get('email_date'):
@@ -207,15 +205,15 @@ def run_processing(batch_size: int = 5):
                     batch_extracted.append(record)
                     logger.info(f"   ✨ {exp.amount}€ ({exp.date if getattr(exp, 'date', None) else email.get('email_date', 'n/d')} {exp.time})")
             except Exception as e:
-                logger.error(f"   ❌ Errore parsing ID {email['id']}: {e}")
+                logger.error(f"   ❌ Parsing Error ID {email['id']}: {e}")
 
         if batch_extracted:
             save_to_silver(batch_extracted)
             total_extracted += len(batch_extracted)
-            logger.info(f"💾 Salvataggio batch completato: {len(batch_extracted)} transazioni aggiunte.")
+            logger.info(f"💾 Batch saved: {len(batch_extracted)} extractions added.")
 
     if total_extracted:
-        logger.info(f"💾 Salvataggio totale completato: {total_extracted} transazioni aggiunte.")
+        logger.info(f"💾 Total saving completed: {total_extracted} extractions added.")
 
 # --- CLI ENTRY POINT ---
 if __name__ == "__main__":

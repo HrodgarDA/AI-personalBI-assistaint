@@ -1,32 +1,19 @@
 import json
-from src.models import ExpenseCategory, ExpenseExtraction, IncomeCategory, IncomeExtraction
+from src.models import TransactionCategory, TransactionExtraction
 
-EMAIL_PROMPT_TEMPLATE = "Data: {date}\nOrario: {time}\nTesto: {body}"
+EMAIL_PROMPT_TEMPLATE = "Date: {date}\nTime: {time}\nSubject: {subject}\nText: {body}"
 
-SYSTEM_EXPENSE_EXTRACTION_PROMPT = (
-    "Sei un assistente che estrae transazioni bancarie in uscita da una email. Estrai solo le spese reali, "
-    "ignorando saldi, messaggi promozionali e descrizioni non legate a spese.\n"
-    "Rispondi con un JSON valido che rispetti esattamente la struttura del modello Pydantic sottostante.\n"
-    "Schema modello: \n"
-    f"{json.dumps(ExpenseExtraction.model_json_schema(), indent=2, ensure_ascii=False)}\n"
-    "Usa esclusivamente le seguenti categorie: \n"
-    + "\n".join(f"- {category.value}" for category in ExpenseCategory)
+SYSTEM_TRANSACTION_EXTRACTION_PROMPT = (
+    "You are an assistant extracting bank transactions from emails. Extract ALL transactions, "
+    "both expenses (costs) and incomes (salaries, refunds, reversals).\n"
+    "Carefully read the Subject and the Text to understand if it is a cost, a refund, or a salary.\n"
+    "Respond with a valid JSON strictly following the Pydantic schema below.\n"
+    "Model Schema: \n"
+    f"{json.dumps(TransactionExtraction.model_json_schema(), indent=2, ensure_ascii=False)}\n"
+    "Use exclusively the following categories: \n"
+    + "\n".join(f"- {category.value}" for category in TransactionCategory)
     + "\n"
-    "Usa 'Altro' solo quando la spesa non rientra chiaramente in nessuna delle categorie sopra. "
-    "Se una transazione è chiaramente un abbonamento, bolletta, cibo, trasporto o sport, "
-    "classificala nella categoria più corretta anziché in 'Altro'."
-)
-
-SYSTEM_INCOME_EXTRACTION_PROMPT = (
-    "Sei un assistente che estrae transazioni bancarie in entrata da una email. Estrai solo i bonifici ricevuti, "
-    "ignorando messaggi promozionali, notifiche di saldo e dettagli non legati a entrate effettive.\n"
-    "Rispondi con un JSON valido che rispetti esattamente la struttura del modello Pydantic sottostante.\n"
-    "Schema modello: \n"
-    f"{json.dumps(IncomeExtraction.model_json_schema(), indent=2, ensure_ascii=False)}\n"
-    "Usa esclusivamente le seguenti categorie: \n"
-    + "\n".join(f"- {category.value}" for category in IncomeCategory)
-    + "\n"
-    "Usa 'Altro' solo quando l'entrata non rientra chiaramente in nessuna delle categorie sopra. "
-    "Se si tratta di stipendio, regalo, rimborso o saldo con amici, "
-    "classificala nella categoria più corretta anziché in 'Altro'."
+    "IMPORTANT: If the transaction is an Expense, the amount MUST be a negative number. "
+    "If it is a Refund or a Salary, the amount MUST be a positive number.\n"
+    "{user_feedback_examples}"
 )

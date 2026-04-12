@@ -19,6 +19,7 @@ beautifulsoup4 = "^4.14.3"
 plotly = "^6.7.0"
 bs4 = "^0.0.2"
 streamlit = "^1.30.0"
+ddgs = "^9.13.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

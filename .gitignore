@@ -2,8 +2,10 @@ secrets.txt
 credentials.json
 .env
 token.json
-data/bronze_raw_emails.jsonl
 temp/insights.py
 .gitignore
 temp/test.py
+
+data/bronze_raw_emails.jsonl
 data/silver_expenses.json
+data/gold_certified_data.csv

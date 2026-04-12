@@ -5,37 +5,32 @@ from pathlib import Path
 
 import streamlit as st
 from src.graph import plot_amount_over_time, plot_category_pie, plot_category_totals
+from src.main import run_ingestion, run_processing, run_certify
+from src.feedback import log_feedback_and_update_silver
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "gold_certified_data.csv"
 DATE_FORMAT = "%Y-%m-%d"
 
 
-def apply_theme(is_dark: bool):
-    if is_dark:
-        css = """
-        <style>
-            [data-testid="stAppViewContainer"] { background-color: #111827; }
-            [data-testid="stHeader"] { background-color: rgba(17, 24, 39, 0.8); }
-            [data-testid="stSidebar"] { background-color: #1F2937; }
-            h1, h2, h3, h4, p, label, .stMarkdown, .stText { color: #F9FAFB !important; }
-            div[data-testid="stMetricValue"], div[data-testid="stMetricLabel"] { color: #F9FAFB !important; }
-            div[data-testid="stVerticalBlockBorderWrapper"] { border-color: #374151 !important; border-radius: 12px; background-color: #1F2937; }
-            .stDataFrame { border-radius: 8px; }
-            [data-baseweb="select"] > div { background-color: #374151; color: white; }
-        </style>
-        """
-    else:
-        css = """
-        <style>
-            [data-testid="stAppViewContainer"] { background-color: #F3F4F6; }
-            [data-testid="stHeader"] { background-color: rgba(243, 244, 246, 0.8); }
-            [data-testid="stSidebar"] { background-color: #FFFFFF; }
-            h1, h2, h3, h4, p, label, .stMarkdown, .stText { color: #111827 !important; }
-            div[data-testid="stMetricValue"], div[data-testid="stMetricLabel"] { color: #111827 !important; }
-            div[data-testid="stVerticalBlockBorderWrapper"] { border-color: #E5E7EB !important; border-radius: 12px; background-color: #FFFFFF; }
-            .stDataFrame { border-radius: 8px; }
-        </style>
-        """
+def apply_theme():
+    css = """
+    <style>
+        [data-testid="stAppViewContainer"] { background-color: #111827 !important; }
+        [data-testid="stHeader"] { background-color: rgba(17, 24, 39, 0.8) !important; }
+        [data-testid="stSidebar"] { background-color: #1F2937 !important; }
+        h1, h2, h3, h4, p, label, .stMarkdown, .stText { color: #F9FAFB !important; }
+        div[data-testid="stMetricValue"] { color: #F9FAFB !important; display: flex; justify-content: center; }
+        div[data-testid="stMetricLabel"] { color: #F9FAFB !important; display: flex; justify-content: center; }
+        div[data-testid="stVerticalBlockBorderWrapper"] { border-color: #374151 !important; border-radius: 12px; background-color: #1F2937 !important; }
+        button[kind="secondary"] { background-color: #1F2937 !important; color: #F9FAFB !important; border-color: #374151 !important; }
+        button[kind="secondary"]:hover { border-color: #F9FAFB !important; color: #F9FAFB !important; background-color: #374151 !important; }
+        button[kind="primary"], button[kind="primary"] * { color: #111827 !important; }
+        span[data-baseweb="tag"] { color: #111827 !important; }
+        span[data-baseweb="tag"] svg { color: #111827 !important; }
+        /* Partial Canvas Wrapper Styling */
+        [data-testid="stDataFrameResizable"] { background-color: #1F2937 !important; }
+    </style>
+    """
     st.markdown(css, unsafe_allow_html=True)
 
 
@@ -66,11 +61,10 @@ def load_data(path: Path):
     return rows
 
 
-def render_dashboard(data, is_dark: bool):
-    st.title("💸 Financial Dashboard")
-    st.markdown("Monitor and analyze your spending trends with advanced analytics.", unsafe_allow_html=True)
+def render_dashboard(data):
+    st.markdown("<h1 style='text-align: center;'>💸 Personal BI</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Monitor and analyze your spending trends with advanced analytics.</p><br>", unsafe_allow_html=True)
 
-    # Calculate KPIs
     valid_amounts = [row.get("amount", 0) for row in data if isinstance(row.get("amount"), (int, float))]
     total_amount = sum(valid_amounts)
     num_tx = len(data)
@@ -83,111 +77,136 @@ def render_dashboard(data, is_dark: bool):
              cat_totals[cat] += amount
     top_cat = max(cat_totals.items(), key=lambda x: x[1])[0] if cat_totals else "N/A"
 
-    # Display KPI Metrics
     with st.container(border=True):
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Spending", f"€ {total_amount:,.2f}")
-        col2.metric("Total Transactions", num_tx)
-        col3.metric("Top Category", top_cat)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Transactions", num_tx)
+        col2.metric("Total Spending", f"€ {total_amount:,.2f}")
+        avg_tx = total_amount / num_tx if num_tx else 0.0
+        col3.metric("Avg Transaction", f"€ {avg_tx:,.2f}")
+        col4.metric("Top Category", top_cat)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Category Charts Options
-    chart_type = st.radio("Select Category Overview type", ["Bar Chart", "Donut Chart"], horizontal=True)
-    if chart_type == "Donut Chart":
-        chart = plot_category_pie(data, is_dark=is_dark)
-    else:
-        chart = plot_category_totals(data, is_dark=is_dark)
+    g_col1, g_col2, g_col3 = st.columns([1,1,1])
+    if "time_freq" not in st.session_state:
+        st.session_state["time_freq"] = "M"
+        
+    freq = st.session_state["time_freq"]
+    with g_col1:
+        if st.button("Daily", width='stretch', type="primary" if freq=="D" else "secondary"):
+            st.session_state["time_freq"] = "D"
+            st.rerun()
+    with g_col2:
+        if st.button("Weekly", width='stretch', type="primary" if freq=="W" else "secondary"):
+            st.session_state["time_freq"] = "W"
+            st.rerun()
+    with g_col3:
+        if st.button("Monthly", width='stretch', type="primary" if freq=="M" else "secondary"):
+            st.session_state["time_freq"] = "M"
+            st.rerun()
 
-    # Layout for charts
-    col1, col2 = st.columns(2)
-    with col1:
-        with st.container(border=True):
-            st.plotly_chart(chart, use_container_width=True)
+    st.markdown("<h3 style='text-align: center;'>Total Expenses Over Time</h3>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.plotly_chart(plot_amount_over_time(data, freq=st.session_state["time_freq"]), width='stretch')
 
-    with col2:
-        with st.container(border=True):
-            st.plotly_chart(plot_amount_over_time(data, is_dark=is_dark), use_container_width=True)
+    st.markdown("<h3 style='text-align: center;'>Distribution by Category</h3>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.plotly_chart(plot_category_pie(data), width='stretch')
+
+    st.markdown("<h3 style='text-align: center;'>Total Amount by Category</h3>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.plotly_chart(plot_category_totals(data), width='stretch')
 
     st.caption("Insights generated by Auto-BI Assistant.")
 
 
-def render_table(data):
-    st.title("🗂️ Data Explorer")
-    st.markdown("Filter and view your raw certified data.")
+def render_table(filtered, total_len):
+    st.markdown("<h1 style='text-align: center;'>🗂️ Data Explorer</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Filter and view your raw certified data.</p><br>", unsafe_allow_html=True)
 
-    categories = sorted({row.get("category", "") for row in data if row.get("category", "")})
-    categories.insert(0, "All")
-
-    dates = [row.get("parsed_date") for row in data if row.get("parsed_date") is not None]
-    min_date = min(dates) if dates else date.today()
-    max_date = max(dates) if dates else date.today()
-
-    today = date.today()
-    start_of_year = date(today.year, 1, 1)
-    default_start = max(start_of_year, min_date)
-    default_end = min(today, max_date)
-
-    with st.container(border=True):
-        st.subheader("Filters")
-        filter_col1, filter_col2 = st.columns((2, 3))
-        selected_categories = filter_col1.multiselect("Category", categories, default=["All"])
-        selected_dates = filter_col2.date_input(
-            "Date range",
-            value=(default_start, default_end),
-            min_value=min_date,
-            max_value=max_date,
-        )
-
-    if isinstance(selected_dates, tuple):
-        selected_dates = list(selected_dates)
-
-    if isinstance(selected_dates, list) and len(selected_dates) == 2:
-        start_date, end_date = selected_dates
-    else:
-        start_date = end_date = selected_dates
-
-    filtered = data
-    if selected_categories and "All" not in selected_categories:
-        filtered = [row for row in filtered if row.get("category") in selected_categories]
-
-    filtered = [
-        row
-        for row in filtered
-        if row.get("parsed_date") is not None and start_date <= row["parsed_date"] <= end_date
-    ]
-
-    st.write(f"**Showing {len(filtered)} of {len(data)} transactions**")
+    st.write(f"**Showing {len(filtered)} of {total_len} transactions**")
     
-    st.dataframe(
+    col_config = {
+        "parsed_date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+        "category": st.column_config.TextColumn("Category"),
+        "merchant": st.column_config.TextColumn("Merchant"),
+        "amount": st.column_config.NumberColumn("Amount", format="€ %.2f"),
+        "tipology": st.column_config.TextColumn("Tipology"),
+        "reasoning": st.column_config.TextColumn("Reasoning"),
+        "confidence": None,
+        "original_msg_id": None,
+        "date": None,
+        "time": None,
+        "direction": None, # Ignore the old direction field if present
+    }
+
+    edited_data = st.data_editor(
         filtered,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
-        column_config={
-            "parsed_date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
-            "amount": st.column_config.NumberColumn("Amount", format="€ %.2f"),
-            "confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=1, format="%.2f"),
-        }
+        height=700,
+        column_order=["parsed_date", "category", "merchant", "amount", "tipology", "reasoning"],
+        column_config=col_config,
+        disabled=["parsed_date", "confidence", "reasoning", "tipology", "merchant"]
     )
+
+    if st.button("💾 Save Changes", type="primary"):
+        changes = []
+        for old_row, new_row in zip(filtered, edited_data):
+            cat_changed = old_row.get("category") != new_row.get("category")
+            amt_changed = old_row.get("amount") != new_row.get("amount")
+            
+            if cat_changed or amt_changed:
+                changes.append({
+                    "msg_id": old_row.get("original_msg_id"),
+                    "original_category": old_row.get("category"),
+                    "corrected_category": new_row.get("category"),
+                    "original_amount": old_row.get("amount"),
+                    "corrected_amount": new_row.get("amount"),
+                })
+        
+        if changes:
+            log_feedback_and_update_silver(changes)
+            st.success(f"Successfully applied {len(changes)} modifications.")
+            st.rerun()
+        else:
+            st.info("No modifications detected.")
 
 
 def main():
     st.set_page_config(page_title="Personal BI Assistant", page_icon="📈", layout="wide")
 
+    # Stato persistente
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = "Dashboard"
+
     # Sidebar settings
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["📊 Dashboard", "📋 Table"])
+    
+    if st.sidebar.button("📊 Dashboard", width='stretch'):
+        st.session_state["current_page"] = "Dashboard"
+    if st.sidebar.button("📋 Table", width='stretch'):
+        st.session_state["current_page"] = "Table"
     
     st.sidebar.markdown("---")
     
-    # Theme Toggle
-    if "dark_mode" not in st.session_state:
-        st.session_state.dark_mode = True # Default to dark mode
+    st.sidebar.subheader("⚙️ ETL Controls")
+    if st.sidebar.button("📥 Download Emails", width='stretch'):
+        with st.spinner("Downloading emails..."):
+            run_ingestion()
+        st.sidebar.success("Emails downloaded!")
+        
+    if st.sidebar.button("🧠 Process Transactions", width='stretch'):
+        with st.spinner("LLM Processing in progress..."):
+            run_processing()
+            run_certify()
+        st.sidebar.success("Processing complete!")
+        st.rerun()
+
+    st.sidebar.markdown("---")
     
-    is_dark = st.sidebar.toggle("🌙 Dark Mode", value=st.session_state.dark_mode)
-    st.session_state.dark_mode = is_dark
-    
-    apply_theme(is_dark)
+    # App is forced to Dark Mode as per user request
+    apply_theme()
 
     if not DATA_PATH.exists():
         st.sidebar.error(f"File not found: {DATA_PATH}")
@@ -198,10 +217,42 @@ def main():
         st.sidebar.warning("The file exists but does not contain rows to display.")
         return
 
-    if page == "📊 Dashboard":
-        render_dashboard(data, is_dark)
+    st.markdown("<h2 style='text-align: center;'>Global Filters</h2>", unsafe_allow_html=True)
+    with st.container(border=True):
+        categories = sorted({str(row.get("category", "")) for row in data if row.get("category", "")})
+        categories.insert(0, "All")
+        tipologies = sorted({str(row.get("tipology", row.get("direction", ""))) for row in data if row.get("tipology", row.get("direction", ""))})
+        tipologies.insert(0, "All")
+        
+        dates = [row.get("parsed_date") for row in data if row.get("parsed_date") is not None]
+        min_date = min(dates) if dates else date.today()
+        max_date = max(dates) if dates else date.today()
+        today = date.today()
+        start_of_year = date(today.year, 1, 1)
+        default_start = max(start_of_year, min_date)
+        default_end = min(today, max_date)
+
+        col1, col2, col3 = st.columns([1,1,2])
+        selected_categories = col1.multiselect("Category", categories, default=["All"])
+        selected_tipologies = col2.multiselect("Tipology", tipologies, default=["All"])
+        selected_dates = col3.slider("Date Range", min_value=min_date, max_value=max_date, value=(default_start, default_end), format="DD/MM/YYYY")
+
+    start_date, end_date = selected_dates if isinstance(selected_dates, (list, tuple)) and len(selected_dates) == 2 else (selected_dates, selected_dates)
+
+    filtered = data
+    if selected_categories and "All" not in selected_categories:
+        filtered = [row for row in filtered if row.get("category") in selected_categories]
+    if selected_tipologies and "All" not in selected_tipologies:
+        filtered = [row for row in filtered if row.get("tipology", row.get("direction")) in selected_tipologies]
+
+    filtered = [row for row in filtered if row.get("parsed_date") is not None and start_date <= row["parsed_date"] <= end_date]
+
+    st.markdown("---")
+
+    if st.session_state["current_page"] == "Dashboard":
+        render_dashboard(filtered)
     else:
-        render_table(data)
+        render_table(filtered, len(data))
 
 
 if __name__ == "__main__":

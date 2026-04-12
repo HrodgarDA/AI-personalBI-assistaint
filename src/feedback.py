@@ -1,0 +1,63 @@
+import json
+import os
+import logging
+from src.main import run_certify
+
+logger = logging.getLogger(__name__)
+
+USER_FEEDBACK_FILE = "data/user_feedback.json"
+SILVER_FILE = "data/silver_expenses.json"
+
+
+def log_feedback_and_update_silver(changes: list[dict]):
+    """
+    Applies a list of modifications:
+    1. Saves locally to user_feedback.json for AI tuning
+    2. Modifies the specific record in the Silver layer
+    3. Regenerates the Gold layer automatically
+    """
+    os.makedirs("data", exist_ok=True)
+    
+    # --- 1. Log Feedback ---
+    feedback_data = []
+    if os.path.exists(USER_FEEDBACK_FILE):
+        try:
+            with open(USER_FEEDBACK_FILE, "r", encoding="utf-8") as f:
+                feedback_data = json.load(f)
+        except Exception:
+            pass
+            
+    feedback_data.extend(changes)
+    with open(USER_FEEDBACK_FILE, "w", encoding="utf-8") as f:
+        json.dump(feedback_data, f, indent=4, ensure_ascii=False)
+        
+    # --- 2. Update Silver Layer ---
+    if not os.path.exists(SILVER_FILE):
+        return
+        
+    try:
+        with open(SILVER_FILE, "r", encoding="utf-8") as f:
+            silver_records = json.load(f)
+    except Exception as e:
+        logger.error(f"Cannot read silver file: {e}")
+        return
+        
+    changes_map = {str(c["msg_id"]): c for c in changes}
+    
+    for record in silver_records:
+        msg_id = str(record.get("original_msg_id", ""))
+        if msg_id in changes_map:
+            modification = changes_map[msg_id]
+            if "corrected_category" in modification:
+                record["category"] = modification["corrected_category"]
+            if "corrected_amount" in modification:
+                try:
+                    record["amount"] = float(modification["corrected_amount"])
+                except ValueError:
+                    pass
+                    
+    with open(SILVER_FILE, "w", encoding="utf-8") as f:
+        json.dump(silver_records, f, indent=4, ensure_ascii=False)
+        
+    # --- 3. Regenerate Gold CSV ---
+    run_certify()
