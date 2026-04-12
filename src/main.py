@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import argparse
+import time
 from datetime import datetime, timedelta
 from src.gmail_client import GmailScraper
 from src.extractor import TransactionParser
@@ -71,22 +72,24 @@ def save_to_silver(new_records):
 
 
 def run_certify():
+    start_time = time.time()
     logger.info("="*40)
     logger.info("🏅 PHASE: CERTIFY SILVER -> GOLD CSV")
     logger.info("="*40)
     if not os.path.exists(SILVER_FILE):
-        logger.error("❌ Silver file missing. Run --process first.")
+        logger.error("Silver file missing. Run --process first.")
         return
 
     with open(SILVER_FILE, 'r', encoding='utf-8') as f:
         try:
             records = json.load(f)
         except Exception as e:
-            logger.error(f"❌ Cannot read {SILVER_FILE}: {e}")
+            logger.error(f"Cannot read {SILVER_FILE}: {e}")
             return
 
     if not records:
-        logger.info("ℹ️ No records in Silver table. No CSV generated.")
+        elapsed = time.time() - start_time
+        logger.info(f"✅ No records in Silver table. No CSV generated. - Time taken: {elapsed:.2f}s")
         return
 
     os.makedirs("data", exist_ok=True)
@@ -98,10 +101,12 @@ def run_certify():
         for record in records:
             writer.writerow({k: record.get(k, "") for k in fieldnames})
 
-    logger.info(f"✅ CSV Generated: {GOLD_FILE} ({len(records)} rows)")
+    elapsed = time.time() - start_time
+    logger.info(f"✅ CSV Generated: {GOLD_FILE} ({len(records)} rows) - Time taken: {elapsed:.2f}s")
 
 # --- CORE FASES ---
 def run_ingestion():
+    start_time = time.time()
     logger.info("="*40)
     logger.info("📥 PHASE: GMAIL INGESTION")
     logger.info("="*40)
@@ -112,13 +117,13 @@ def run_ingestion():
     last_saved_dt = None if force_full else get_latest_saved_datetime(BRONZE_FILE)
 
     if force_full:
-        logger.info("📈 FORCE_FULL_LOAD=true: downloading all available emails.")
+        logger.info("FORCE_FULL_LOAD=true: downloading all available emails.")
         query_addon = ""
     elif last_saved_dt:
-        logger.info(f"📈 Incremental logic: fetching emails after {last_saved_dt.isoformat()}")
+        logger.info(f"Incremental logic: fetching emails after {last_saved_dt.isoformat()}")
         query_addon = f"after:{last_saved_dt.strftime('%Y/%m/%d')}"
     else:
-        logger.info("📈 No Bronze file found: downloading all available emails.")
+        logger.info("No Bronze file found: downloading all available emails.")
         query_addon = ""
 
     scraper = GmailScraper()
@@ -145,22 +150,24 @@ def run_ingestion():
 
     new_emails.sort(key=lambda e: (e.get("email_date", ""), e.get("email_time", "")))
 
+    elapsed = time.time() - start_time
     if new_emails:
-        logger.info(f"💾 Writing {len(new_emails)} new messages to Bronze layer...")
+        logger.info(f"Writing {len(new_emails)} new messages to Bronze layer...")
         with open(BRONZE_FILE, "a", encoding="utf-8") as b_f:
             for m in new_emails:
                 b_f.write(json.dumps(m, ensure_ascii=False) + "\n")
-        logger.info("✅ Ingestion completed successfully.")
+        logger.info(f"✅ Ingestion completed successfully - Time taken: {elapsed:.2f}s")
     else:
-        logger.info("✅ No new emails found compared to local Bronze.")
+        logger.info(f"✅ No new emails found compared to local Bronze - Time taken: {elapsed:.2f}s")
 
 def run_processing(batch_size: int = 5):
+    start_time = time.time()
     logger.info("="*40)
     logger.info("🧠 PHASE: LLM PROCESSING")
     logger.info("="*40)
     
     if not os.path.exists(BRONZE_FILE):
-        logger.error("❌ Bronze file missing. Run --ingest first.")
+        logger.error("Bronze file missing. Run --ingest first.")
         return
 
     all_raw = []
@@ -173,14 +180,16 @@ def run_processing(batch_size: int = 5):
     to_process = [m for m in all_raw if m["id"] not in processed_silver_ids]
 
     if not to_process:
-        logger.info("✅ Silver Layer already synced. Nothing to process.")
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Silver Layer already synced. Nothing to process. - Time taken: {elapsed:.2f}s")
         return
 
-    logger.info(f"🚀 Starting to parse {len(to_process)} emails.")
+    logger.info(f"Starting to parse {len(to_process)} emails.")
     parser = TransactionParser()
     total_extracted = 0
 
     for i in range(0, len(to_process), batch_size):
+        batch_start = time.time()
         batch = to_process[i:i + batch_size]
         logger.info(f"📦 Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
         batch_extracted = []
@@ -203,17 +212,22 @@ def run_processing(batch_size: int = 5):
                     record = exp.model_dump()
                     record["original_msg_id"] = email['id']
                     batch_extracted.append(record)
-                    logger.info(f"   ✨ {exp.amount}€ ({exp.date if getattr(exp, 'date', None) else email.get('email_date', 'n/d')} {exp.time})")
+                    logger.info(f"   {exp.amount}€ ({exp.date if getattr(exp, 'date', None) else email.get('email_date', 'n/d')} {exp.time})")
             except Exception as e:
-                logger.error(f"   ❌ Parsing Error ID {email['id']}: {e}")
+                logger.error(f"   Parsing Error ID {email['id']}: {e}")
 
         if batch_extracted:
             save_to_silver(batch_extracted)
             total_extracted += len(batch_extracted)
-            logger.info(f"💾 Batch saved: {len(batch_extracted)} extractions added.")
+            
+        batch_elapsed = time.time() - batch_start
+        logger.info(f"Batch saved: {len(batch_extracted)} extractions added - Time taken: {batch_elapsed:.2f}s")
 
+    elapsed = time.time() - start_time
     if total_extracted:
-        logger.info(f"💾 Total saving completed: {total_extracted} extractions added.")
+        logger.info(f"✅ Total saving completed: {total_extracted} extractions added - Total time: {elapsed:.2f}s")
+    else:
+        logger.info(f"✅ Processing completed with 0 new extractions - Total time: {elapsed:.2f}s")
 
 # --- CLI ENTRY POINT ---
 if __name__ == "__main__":
