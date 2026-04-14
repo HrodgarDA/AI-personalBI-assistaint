@@ -83,10 +83,12 @@ class GmailScraper:
                         clean_body = self._clean_html(raw_body)
                         extracted_data.append({
                             "id": m_id,
-                            "subject": subject,
-                            "body": clean_body,
-                            "email_date": email_date,
-                            "email_time": email_time
+                            "date": email_date,
+                            "time": email_time,
+                            "operation": subject,
+                            "details": clean_body,
+                            "amount": 0.0,
+                            "bank_category_hint": "",
                         })
                 
                 # Check per pagina successiva
@@ -98,7 +100,7 @@ class GmailScraper:
                     
             return sorted(
                 extracted_data,
-                key=lambda e: (e.get("email_date", ""), e.get("email_time", ""))
+                key=lambda e: (e.get("date", ""), e.get("time", ""))
             )
         except Exception as e:
             logger.error(f"❌ Errore durante il fetching: {e}")

@@ -1,15 +1,24 @@
 import csv
+import logging
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-import streamlit as st
-from src.graph import plot_amount_over_time, plot_category_pie, plot_category_totals
-from src.main import run_ingestion, run_processing, run_certify
-from src.feedback import log_feedback_and_update_silver
+# Configure logging to show in terminal
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
-DATA_PATH = Path(__file__).resolve().parent / "data" / "gold_certified_data.csv"
+import streamlit as st
+from auto_bi.core.ingestion import run_ingestion, ingest_excel
+from auto_bi.core.process import run_processing, run_excel_processing, run_certify
+from auto_bi.utils.feedback import log_feedback_and_update_silver
+from auto_bi.utils.config import GOLD_FILE
+from auto_bi.utils.graph import plot_amount_over_time, plot_category_pie, plot_category_totals
+
+
+DATA_PATH = Path(GOLD_FILE)
 DATE_FORMAT = "%Y-%m-%d"
+
 
 
 def apply_theme():
@@ -19,8 +28,9 @@ def apply_theme():
         [data-testid="stHeader"] { background-color: rgba(17, 24, 39, 0.8) !important; }
         [data-testid="stSidebar"] { background-color: #1F2937 !important; }
         h1, h2, h3, h4, p, label, .stMarkdown, .stText { color: #F9FAFB !important; }
-        div[data-testid="stMetricValue"] { color: #F9FAFB !important; display: flex; justify-content: center; }
-        div[data-testid="stMetricLabel"] { color: #F9FAFB !important; display: flex; justify-content: center; }
+        [data-testid="stMetric"] { display: flex; flex-direction: column; align-items: center; text-align: center; }
+        [data-testid="stMetricLabel"] > div { justify-content: center !important; }
+        [data-testid="stMetricValue"] > div { justify-content: center !important; }
         div[data-testid="stVerticalBlockBorderWrapper"] { border-color: #374151 !important; border-radius: 12px; background-color: #1F2937 !important; }
         button[kind="secondary"] { background-color: #1F2937 !important; color: #F9FAFB !important; border-color: #374151 !important; }
         button[kind="secondary"]:hover { border-color: #F9FAFB !important; color: #F9FAFB !important; background-color: #374151 !important; }
@@ -62,11 +72,12 @@ def load_data(path: Path):
 
 
 def render_dashboard(data):
-    st.markdown("<h1 style='text-align: center;'>💸 Personal BI</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Monitor and analyze your spending trends with advanced analytics.</p><br>", unsafe_allow_html=True)
-
-    valid_amounts = [row.get("amount", 0) for row in data if isinstance(row.get("amount"), (int, float))]
-    total_amount = sum(valid_amounts)
+    # Separate Outgoing and Incoming (with backward compatibility)
+    outgoing = [abs(row.get("amount", 0)) for row in data if row.get("tipology") in ["Outgoing", "Expense"]]
+    incoming = [abs(row.get("amount", 0)) for row in data if row.get("tipology") in ["Incoming", "Salary", "Refund"]]
+    
+    total_outgoing = sum(outgoing)
+    total_incoming = sum(incoming)
     num_tx = len(data)
     
     cat_totals = defaultdict(float)
@@ -74,15 +85,23 @@ def render_dashboard(data):
         amount = row.get("amount")
         cat = row.get("category")
         if cat and isinstance(amount, (int, float)):
-             cat_totals[cat] += amount
+             cat_totals[cat] += abs(amount)
     top_cat = max(cat_totals.items(), key=lambda x: x[1])[0] if cat_totals else "N/A"
+
+    # Net Balance Widget (Moved above)
+    balance = total_incoming - total_outgoing
+    st.markdown(f"""
+        <div style='background-color: #1F2937; padding: 6px 15px; border-radius: 12px; border: 1px solid #374151; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; gap: 20px;'>
+            <span style='margin: 0; font-size: 0.8rem; color: #9CA3AF; text-transform: uppercase; font-weight: 600;'>Net Balance</span>
+            <span style='margin: 0; color: {"#10B981" if balance >=0 else "#EF4444"}; font-size: 1.6rem; font-weight: bold;'>€ {balance:,.2f}</span>
+        </div>
+    """, unsafe_allow_html=True)
 
     with st.container(border=True):
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Transactions", num_tx)
-        col2.metric("Total Spending", f"€ {total_amount:,.2f}")
-        avg_tx = total_amount / num_tx if num_tx else 0.0
-        col3.metric("Avg Transaction", f"€ {avg_tx:,.2f}")
+        col1.metric("Transactions", num_tx)
+        col2.metric("Incoming", f"€ {total_incoming:,.2f}", delta_color="normal")
+        col3.metric("Outgoing", f"€ {total_outgoing:,.2f}", delta_color="inverse")
         col4.metric("Top Category", top_cat)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -105,25 +124,22 @@ def render_dashboard(data):
             st.session_state["time_freq"] = "M"
             st.rerun()
 
-    st.markdown("<h3 style='text-align: center;'>Total Expenses Over Time</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center;'>Salary vs Expenses</h3>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.plotly_chart(plot_amount_over_time(data, freq=st.session_state["time_freq"]), width='stretch')
+        st.plotly_chart(plot_amount_over_time(data, freq=st.session_state["time_freq"]), width='stretch', key="chart_over_time")
 
     st.markdown("<h3 style='text-align: center;'>Distribution by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.plotly_chart(plot_category_pie(data), width='stretch')
+        st.plotly_chart(plot_category_pie(data), width='stretch', key="chart_category_pie")
 
     st.markdown("<h3 style='text-align: center;'>Total Amount by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.plotly_chart(plot_category_totals(data), width='stretch')
+        st.plotly_chart(plot_category_totals(data), width='stretch', key="chart_category_totals")
 
     st.caption("Insights generated by Auto-BI Assistant.")
 
 
 def render_table(filtered, total_len):
-    st.markdown("<h1 style='text-align: center;'>🗂️ Data Explorer</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Filter and view your raw certified data.</p><br>", unsafe_allow_html=True)
-
     st.write(f"**Showing {len(filtered)} of {total_len} transactions**")
     
     col_config = {
@@ -135,8 +151,8 @@ def render_table(filtered, total_len):
         "reasoning": st.column_config.TextColumn("Reasoning"),
         "confidence": None,
         "original_msg_id": None,
+        "time": st.column_config.TextColumn("Time"),
         "date": None,
-        "time": None,
         "direction": None, # Ignore the old direction field if present
     }
 
@@ -145,9 +161,9 @@ def render_table(filtered, total_len):
         width='stretch',
         hide_index=True,
         height=700,
-        column_order=["parsed_date", "category", "merchant", "amount", "tipology", "reasoning"],
+        column_order=["parsed_date", "time", "category", "merchant", "amount", "tipology", "reasoning"],
         column_config=col_config,
-        disabled=["parsed_date", "confidence", "reasoning", "tipology", "merchant"]
+        disabled=["parsed_date", "time", "confidence", "reasoning", "tipology", "merchant"]
     )
 
     if st.button("💾 Save Changes", type="primary"):
@@ -191,33 +207,77 @@ def main():
     st.sidebar.markdown("---")
     
     st.sidebar.subheader("⚙️ ETL Controls")
+    
+    st.sidebar.markdown("**Email Processing**")
     if st.sidebar.button("📥 Download Emails", width='stretch'):
         with st.spinner("Downloading emails..."):
             run_ingestion()
         st.sidebar.success("Emails downloaded!")
         
-    if st.sidebar.button("🧠 Process Transactions", width='stretch'):
+    if st.sidebar.button("🧠 Process Emails", width='stretch', key="process_emails_btn"):
+        progress_bar = st.sidebar.progress(0)
+        status_text = st.sidebar.empty()
+        
+        def update_progress(current, total):
+            p = min(current / total, 1.0) if total > 0 else 1.0
+            progress_bar.progress(p)
+            status_text.write(f"**Progress:** {current}/{total} emails")
+
         with st.spinner("LLM Processing in progress..."):
-            run_processing()
+            run_processing(progress_callback=update_progress)
             run_certify()
         st.sidebar.success("Processing complete!")
         st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Excel Processing**")
+    uploaded_excel = st.sidebar.file_uploader("Upload Excel CSV/XLSX", type=["csv", "xlsx", "xls"])
+    
+    if uploaded_excel is not None:
+        # Step 1: Archive to Bronze
+        if st.sidebar.button("📥 Archive", width='stretch'):
+            with st.spinner("Archive in progress..."):
+                rows_added = ingest_excel(uploaded_excel)
+                if rows_added > 0:
+                    st.sidebar.success(f"Archived {rows_added} new unique rows.")
+                else:
+                    st.sidebar.info("No new rows found or already archived.")
+        
+        # Step 2: Process & Certify
+        if st.sidebar.button("🧠 Process", width='stretch', key="process_excel_btn"):
+            progress_bar = st.sidebar.progress(0)
+            status_text = st.sidebar.empty()
+            
+            def update_progress(current, total):
+                p = min(current / total, 1.0) if total > 0 else 1.0
+                progress_bar.progress(p)
+                status_text.write(f"**Progress:** {current}/{total} transactions")
+
+            with st.spinner("Process in progress (Silver & Gold)..."):
+                run_excel_processing(progress_callback=update_progress)
+                run_certify()
+            st.sidebar.success("Excel Processing complete!")
+            st.rerun()
 
     st.sidebar.markdown("---")
     
     # App is forced to Dark Mode as per user request
     apply_theme()
 
+    data = load_data(DATA_PATH) if DATA_PATH.exists() else []
+    
     if not DATA_PATH.exists():
         st.sidebar.error(f"File not found: {DATA_PATH}")
-        return
+    elif not data:
+        st.sidebar.warning("The data file is empty.")
 
-    data = load_data(DATA_PATH)
-    if not data:
-        st.sidebar.warning("The file exists but does not contain rows to display.")
-        return
+    st.markdown("<h1 style='text-align: center;'>Personal BI Assistant</h1>", unsafe_allow_html=True)
 
-    st.markdown("<h2 style='text-align: center;'>Global Filters</h2>", unsafe_allow_html=True)
+    if st.session_state["current_page"] == "Dashboard":
+        st.markdown("<h2 style='text-align: center;'>📈 Dashboard</h2>", unsafe_allow_html=True)
+    else:
+        st.markdown("<h2 style='text-align: center;'>📋 Data Explorer</h2>", unsafe_allow_html=True)
+
     with st.container(border=True):
         categories = sorted({str(row.get("category", "")) for row in data if row.get("category", "")})
         categories.insert(0, "All")
@@ -229,15 +289,32 @@ def main():
         max_date = max(dates) if dates else date.today()
         today = date.today()
         start_of_year = date(today.year, 1, 1)
-        default_start = max(start_of_year, min_date)
-        default_end = min(today, max_date)
+        
+        # Ensure defaults are within the actual data range
+        default_start = max(min_date, min(max_date, start_of_year))
+        default_end = max(min_date, min(max_date, today))
+        
+        # Ensure default range is valid (start <= end)
+        if default_start > default_end:
+            default_start, default_end = min_date, max_date
 
         col1, col2, col3 = st.columns([1,1,2])
         selected_categories = col1.multiselect("Category", categories, default=["All"])
         selected_tipologies = col2.multiselect("Tipology", tipologies, default=["All"])
-        selected_dates = col3.slider("Date Range", min_value=min_date, max_value=max_date, value=(default_start, default_end), format="DD/MM/YYYY")
+        if min_date < max_date:
+            selected_dates = col3.slider("Date Range", min_value=min_date, max_value=max_date, value=(default_start, default_end), format="DD/MM/YYYY")
+        else:
+            # Single date case: fake a range of 1 day to allow the slider to render, but keep it disabled
+            from datetime import timedelta
+            fake_max = min_date + timedelta(days=1)
+            col3.slider("Date Range", min_value=min_date, max_value=fake_max, value=(min_date, min_date), format="DD/MM/YYYY", disabled=True, help="Only one day of data available")
+            selected_dates = (min_date, min_date)
 
     start_date, end_date = selected_dates if isinstance(selected_dates, (list, tuple)) and len(selected_dates) == 2 else (selected_dates, selected_dates)
+    
+    if not dates:
+        # Fallback if no dates exist in data
+        start_date, end_date = date.today(), date.today()
 
     filtered = data
     if selected_categories and "All" not in selected_categories:

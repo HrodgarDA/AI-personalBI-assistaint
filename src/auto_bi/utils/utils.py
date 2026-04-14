@@ -1,0 +1,130 @@
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+# --- CONSTANTS ---
+
+# Operations that are generic (not merchant names) — extract merchant from details instead
+GENERIC_OPERATIONS = {
+    "pagamento pos", "pagamento tramite pos",
+    "pagamento effettuato su pos estero",
+    "storno pagamento pos",
+    "addebito diretto",
+    "stipendio o pensione",
+}
+
+# Heuristic lists for distinguishing between businesses and private individuals
+BUSINESS_INDICATORS = {
+    "s.r.l.", "srl", "s.p.a.", "spa", "s.n.c.", "snc", "s.a.s.", "sas",
+    "pizzeria", "ristorante", "bar", "cafe", "caffé", "trattoria", "osteria",
+    "supermarket", "conad", "coop", "esselunga", "carrefour", "lidl", "eurospin",
+    "farmacia", "tabacchi", "edicola", "stazione", "tamoil", "eni", "q8", "esso",
+    "amazon", "ebay", "paypal", "apple", "google", "netflix", "spotify", "iliad",
+    "vodafone", "telecom", "enel", "a2a", "iren", "latteria", "panificio", "pasticceria",
+    "kebbab", "kebab", "burger", "shop", "store", "market", "outlet", "mall",
+}
+
+LINKING_PREPOSITIONS = {"da", "di", "del", "della", "degli", "dalle", "presso", "su", "in", "per"}
+
+
+# --- MERCHANT CLEANING ---
+
+def clean_merchant_name(name: str) -> str:
+    """Clean a merchant name, removing trailing dates and noise."""
+    if not name: return "Unknown"
+    clean = name.strip()
+    # Remove trailing date patterns like "08/041312" or "VIA 28/"
+    clean = re.sub(r'\s+\d{2}/\d{2,}.*$', '', clean)
+    # Remove trailing numbers
+    clean = re.sub(r'\s+\d+$', '', clean)
+    return clean.strip()[:50] if clean else "Unknown"
+
+
+def clean_merchant_from_details(details: str) -> str:
+    """Extract merchant name from dirty details field (Excel format)."""
+    if not details or details.strip().upper() == "N.D":
+        return "Unknown"
+    
+    text = details.strip()
+    
+    # Pattern: "Pagamento Su POS MERCHANT_NAME DD/MMHHMM Carta..."
+    pos_match = re.match(r'(?:Pagamento\s+Su\s+POS\s+)(.+?)\s+\d{2}/\d{2}', text, re.IGNORECASE)
+    if pos_match:
+        return pos_match.group(1).strip()[:50]
+    
+    # Pattern: "MERCHANT_NAME DD/MMHHMM Carta N.XXXX..."
+    card_match = re.match(r'(.+?)\s+\d{2}/\d{2}\d{4}\s+Carta', text, re.IGNORECASE)
+    if card_match:
+        return card_match.group(1).strip()[:50]
+    
+    # Pattern: "EFFETTUATO IL DD/MM/YYYY ... PRESSO MERCHANT_NAME"
+    presso_match = re.search(r'PRESSO\s+(.+?)$', text, re.IGNORECASE)
+    if presso_match:
+        return presso_match.group(1).strip()[:50]
+    
+    # Pattern: "Effettuato Il DD/MM/YYYY ... Presso Merchant Name"
+    presso_match2 = re.search(r'Presso\s+(.+?)$', text, re.IGNORECASE)
+    if presso_match2:
+        return presso_match2.group(1).strip()[:50]
+    
+    # Fallback: first 50 chars cleaned of codes
+    fallback = re.sub(r'COD\.?\s*(?:DISP\.?)?\s*\d+[/\s]*\w*', '', text)
+    fallback = re.sub(r'\b\d{10,}\b', '', fallback)
+    fallback = re.sub(r'\s+', ' ', fallback).strip()
+    return fallback[:50] if fallback else "Unknown"
+
+
+def extract_merchant_from_excel(operation: str, details: str) -> str:
+    """Main strategy to extract merchant from Excel fields."""
+    op_lower = operation.strip().lower()
+    
+    # Generic operation?
+    is_generic = any(op_lower.startswith(g) or op_lower == g for g in GENERIC_OPERATIONS)
+    
+    # Bonifico: extract recipient name
+    if op_lower.startswith("bonifico"):
+        for pattern in [r'(?:Disposto Da|A Favore Di)\s+(.+)', ]:
+            match = re.search(pattern, operation, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()[:50]
+        return operation[:50]
+    
+    if not is_generic:
+        return clean_merchant_name(operation)
+    
+    return clean_merchant_from_details(details)
+
+
+# --- SEARCH QUERY UTILS ---
+
+def clean_search_query(merchant_name: str) -> str:
+    """Refine merchant name for cleaner web search."""
+    if not merchant_name: return ""
+    clean = merchant_name.lower()
+    # Remove common irrelevant suffixes
+    clean = re.sub(r'\b(via|v\.le|pza|piazza|corso)\b.*$', '', clean)
+    clean = re.sub(r'\b(carta|pos|cod|disp)\b.*$', '', clean)
+    # Remove numbers and special chars
+    clean = re.sub(r'[\d\.\-\/]+', ' ', clean)
+    # Collapse spaces
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean
+
+
+def is_valid_search_query(query: str) -> bool:
+    """Heuristic to skip web searches for private person names."""
+    if not query or len(query) < 3:
+        return False
+        
+    # Heuristic: 2-3 words, all caps/capitalized, no business indicators
+    words = query.strip().lower().split()
+    if 2 <= len(words) <= 3:
+        has_business_indicator = any(w in BUSINESS_INDICATORS for w in words)
+        has_linking_preposition = any(w in LINKING_PREPOSITIONS for w in words)
+        
+        if not has_business_indicator and not has_linking_preposition:
+            logger.debug(f"   Skipping likely person name search: '{query}'")
+            return False
+            
+    return True

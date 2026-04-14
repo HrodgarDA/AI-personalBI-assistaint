@@ -1,12 +1,11 @@
 import json
 import os
 import logging
-from src.main import run_certify
-
-logger = logging.getLogger(__name__)
+from auto_bi.core.process import run_certify
+from auto_bi.utils.config import SILVER_FILE
 
 USER_FEEDBACK_FILE = "data/user_feedback.json"
-SILVER_FILE = "data/silver_expenses.json"
+
 
 
 def log_feedback_and_update_silver(changes: list[dict]):

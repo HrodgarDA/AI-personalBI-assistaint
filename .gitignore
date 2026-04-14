@@ -1,11 +1,28 @@
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# --- Secrets (KEEP THESE) ---
 secrets.txt
 credentials.json
 .env
 token.json
-temp/insights.py
-.gitignore
-temp/test.py
 
+# --- Data (Ignored to keep repo small/private) ---
 data/bronze_raw_emails.jsonl
 data/silver_expenses.json
 data/gold_certified_data.csv
+data/merchant_catalogue.json
+
+# --- Editor ---
+.vscode/
+.idea/

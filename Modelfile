@@ -1,0 +1,16 @@
+# Ollama Modelfile per Gemma 4 E2B a 4-bit
+# L'espressione "gemma:2b" tira autonomamente la versione quantizzata a 4-bit (q4_0) dal registry di Ollama.
+# Nel caso in cui venga fornito un .gguf esatto scaricato, commentare la prima riga e usare la seconda.
+FROM gemma:2b
+# FROM ./gemma4-e2b-4bit.gguf
+
+# Parametri ottimali per assicurare la massima riproducibilità nei JSON parserizzati.
+PARAMETER temperature 0.0
+PARAMETER top_p 0.9
+PARAMETER stop "<end_of_turn>"
+PARAMETER num_ctx 4096
+
+SYSTEM """
+Sei un analista finanziario estremamente zelante e preciso specializzato nell'estrazione ed elaborazione di spese / transazioni bancarie.
+Rispondi rigorosamente attenendoti al formato JSON che ti viene fornito dal prompt di sistema chiamante. Esegui sempre una predizione se i dati scarseggiano.
+"""

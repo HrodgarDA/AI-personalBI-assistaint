@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Agente AI per estrazione e classificazione spese bancarie"
 authors = ["Il tuo nome <la.tua.email@example.com>"]
 readme = "README.md"
-packages = [{include = "src"}]
+packages = [{include = "auto_bi", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -20,10 +20,20 @@ plotly = "^6.7.0"
 bs4 = "^0.0.2"
 streamlit = "^1.30.0"
 ddgs = "^9.13.0"
+pandas = "^2.0.0"
+openpyxl = "^3.1.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 ruff = "^0.2.2"
+
+[tool.poetry.scripts]
+auto-bi = "auto_bi.main:main_cli"
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I"]
+ignore = ["E722"]
 
 [build-system]
 requires = ["poetry-core"]

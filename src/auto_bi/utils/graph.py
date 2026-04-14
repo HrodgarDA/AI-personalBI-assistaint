@@ -51,10 +51,12 @@ def plot_category_totals(data):
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):
-            totals[category] += amount
+            totals[category] += abs(amount)
 
     if not totals:
-        return go.Figure(layout=_base_layout("No data available", theme))
+        fig = go.Figure()
+        fig.update_layout(_base_layout(theme, xaxis_title="No data available"))
+        return fig
 
     labels, values = zip(*sorted(totals.items(), key=lambda item: item[1], reverse=True))
     labels = [str(label) for label in labels]
@@ -88,10 +90,12 @@ def plot_category_pie(data):
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):
-            totals[category] += amount
+            totals[category] += abs(amount)
 
     if not totals:
-        return go.Figure(layout=_base_layout("No data available", theme))
+        fig = go.Figure()
+        fig.update_layout(_base_layout(theme, xaxis_title="No data available"))
+        return fig
 
     labels, values = zip(*sorted(totals.items(), key=lambda item: item[1], reverse=True))
     
@@ -113,13 +117,13 @@ def plot_category_pie(data):
 
 def plot_amount_over_time(data, freq="D"):
     theme = get_theme()
-    daily_salary = defaultdict(float)
-    daily_expenses = defaultdict(float)
+    daily_incoming = defaultdict(float)
+    daily_outgoing = defaultdict(float)
     import datetime
     
     for row in data:
         amount = row.get("amount")
-        tipology = row.get("tipology", row.get("direction"))  # fallback for old data
+        tipology = row.get("tipology", row.get("direction"))
         date_value = row.get("date")
         parsed = _parse_date(date_value)
         if parsed and isinstance(amount, (int, float)):
@@ -128,14 +132,13 @@ def plot_amount_over_time(data, freq="D"):
             elif freq == "M":
                 parsed = parsed.replace(day=1)
                 
-            if tipology == "Salary":
-                daily_salary[parsed] += amount
-            elif tipology in ["Expense", "Refund"] or tipology == "expense":
-                daily_expenses[parsed] += amount
-            else:
-                daily_expenses[parsed] += amount
+            # New logic: Incoming vs Outgoing (with backward compat)
+            if tipology == "Incoming" or tipology == "Salary":
+                daily_incoming[parsed] += abs(amount)
+            else:  # Outgoing, Expense, Refund, or any other
+                daily_outgoing[parsed] += abs(amount)
 
-    all_dates = sorted(set(list(daily_salary.keys()) + list(daily_expenses.keys())))
+    all_dates = sorted(set(list(daily_incoming.keys()) + list(daily_outgoing.keys())))
 
     if not all_dates:
         return go.Figure(layout=_base_layout(theme))
@@ -147,32 +150,32 @@ def plot_amount_over_time(data, freq="D"):
     else:
         x_labels = all_dates
 
-    y_salary = [float(daily_salary.get(d, 0.0)) for d in all_dates]
-    y_expenses = [float(daily_expenses.get(d, 0.0)) for d in all_dates]
+    y_incoming = [float(daily_incoming.get(d, 0.0)) for d in all_dates]
+    y_outgoing = [float(daily_outgoing.get(d, 0.0)) for d in all_dates]
 
     fig = go.Figure()
     
-    has_salary = any(y > 0 for y in y_salary)
+    has_incoming = any(y > 0 for y in y_incoming)
     
-    if has_salary:
+    if has_incoming:
         fig.add_trace(go.Scatter(
             x=x_labels, 
-            y=y_salary, 
-            name="Salary",
+            y=y_incoming, 
+            name="Incoming",
             mode="lines+markers", 
             line=dict(color=theme["palette"][1], width=3, shape='spline'),
             marker=dict(size=8, color=theme["palette"][1], line=dict(width=1, color=theme["bg_color"])),
-            hovertemplate="<b>%{x}</b><br>Salary: %{y:.2f} €<extra></extra>"
+            hovertemplate="<b>%{x}</b><br>Incoming: %{y:.2f} €<extra></extra>"
         ))
         
     fig.add_trace(go.Scatter(
         x=x_labels, 
-        y=y_expenses, 
-        name="Expenses",
+        y=y_outgoing, 
+        name="Outgoing",
         mode="lines+markers", 
-        line=dict(color=theme["palette"][3], width=3, shape='spline'), # Red for expenses
+        line=dict(color=theme["palette"][3], width=3, shape='spline'),
         marker=dict(size=8, color=theme["palette"][3], line=dict(width=1, color=theme["bg_color"])),
-        hovertemplate="<b>%{x}</b><br>Expenses: %{y:.2f} €<extra></extra>"
+        hovertemplate="<b>%{x}</b><br>Outgoing: %{y:.2f} €<extra></extra>"
     ))
     
     fig.update_layout(
@@ -180,3 +183,4 @@ def plot_amount_over_time(data, freq="D"):
         hovermode="x unified"
     )
     return fig
+
