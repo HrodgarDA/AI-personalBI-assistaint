@@ -64,9 +64,6 @@ def plot_category_totals(data):
     theme = get_theme()
     totals = defaultdict(float)
     for row in data:
-        tipology = row.get("tipology", row.get("direction"))
-        if tipology not in ("Outgoing", "Expense"):
-            continue
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):
@@ -112,9 +109,6 @@ def plot_category_pie(data):
     theme = get_theme()
     totals = defaultdict(float)
     for row in data:
-        tipology = row.get("tipology", row.get("direction"))
-        if tipology not in ("Outgoing", "Expense"):
-            continue
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):

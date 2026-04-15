@@ -117,8 +117,6 @@ def main():
     else:
         # Filter Logic (Shared between Dashboard and Table)
         with st.container(border=True):
-            categories = sorted({str(row.get("category", "")) for row in data if row.get("category", "")})
-            categories.insert(0, "All")
             tipologies = sorted({str(row.get("tipology", row.get("direction", ""))) for row in data if row.get("tipology", row.get("direction", ""))})
             tipologies.insert(0, "All")
             
@@ -136,8 +134,55 @@ def main():
                 default_start, default_end = min_date, max_date
 
             col1, col2, col3 = st.columns([2, 2, 4])
-            selected_categories = col1.multiselect("Category", categories, default=["All"])
-            selected_tipologies = col2.multiselect("Tipology", tipologies, default=["All"])
+            
+            # Tipology (Single Select)
+            selected_tipology = col2.selectbox("Tipology", tipologies, index=0)
+            
+            # Dynamic Categories (Smart Filter)
+            if selected_tipology == "All":
+                available_categories = sorted({str(row.get("category", "")) for row in data if row.get("category", "")})
+            else:
+                available_categories = sorted({
+                    str(row.get("category", "")) for row in data 
+                    if row.get("tipology", row.get("direction", "")) == selected_tipology and row.get("category", "")
+                })
+            available_categories.insert(0, "All")
+            
+            # Logic to make "All" mutually exclusive
+            # Logic to make "All" mutually exclusive and handle empty selection
+            if "prev_cats" not in st.session_state:
+                st.session_state.prev_cats = ["All"]
+            if "cat_ms" not in st.session_state or not st.session_state.cat_ms:
+                st.session_state.cat_ms = ["All"]
+            
+            def handle_cat_change():
+                new_selection = st.session_state.cat_ms
+                if not new_selection:
+                    st.session_state.cat_ms = ["All"]
+                elif "All" in new_selection and len(new_selection) > 1:
+                    # Determine if "All" was added or if it was already there
+                    all_was_there = "All" in st.session_state.get("prev_cats", [])
+                    if all_was_there:
+                        # "All" was already selected, user added some other categories -> keep only the new ones
+                        st.session_state.cat_ms = [c for c in new_selection if c != "All"]
+                    else:
+                        # User just added "All" -> keep ONLY "All"
+                        st.session_state.cat_ms = ["All"]
+                
+                st.session_state.prev_cats = st.session_state.cat_ms
+
+            # Sanitize against available categories (e.g. if Tipology changed)
+            sanitized = [c for c in st.session_state.cat_ms if c in available_categories]
+            if not sanitized:
+                sanitized = ["All"]
+            st.session_state.cat_ms = sanitized
+
+            selected_categories = col1.multiselect(
+                "Category", 
+                available_categories, 
+                key="cat_ms",
+                on_change=handle_cat_change,
+            )
             
             if min_date < max_date:
                 selected_dates = col3.slider("Date Range", min_value=min_date, max_value=max_date, value=(default_start, default_end), format="DD/MM/YYYY")
@@ -151,10 +196,11 @@ def main():
         
         # Filtering
         filtered = data
+        if selected_tipology != "All":
+            filtered = [row for row in filtered if row.get("tipology", row.get("direction")) == selected_tipology]
+            
         if selected_categories and "All" not in selected_categories:
             filtered = [row for row in filtered if row.get("category") in selected_categories]
-        if selected_tipologies and "All" not in selected_tipologies:
-            filtered = [row for row in filtered if row.get("tipology", row.get("direction")) in selected_tipologies]
 
         filtered = [row for row in filtered if row.get("parsed_date") is not None and start_date <= row["parsed_date"] <= end_date]
 

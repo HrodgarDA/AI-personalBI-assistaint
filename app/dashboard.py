@@ -13,15 +13,25 @@ def render_dashboard(data):
     total_incoming = sum(incoming)
     num_tx = len(data)
     
+    # Determine the context of the view (Expenses, Income, or Both)
+    active_tips = {row.get("tipology", row.get("direction")) for row in data}
+    is_mostly_income = all(t in ["Incoming", "Salary", "Refund"] for t in active_tips) if active_tips else False
+    is_mostly_expense = all(t in ["Outgoing", "Expense"] for t in active_tips) if active_tips else False
+    
+    if is_mostly_income:
+        chart_title_prefix = "Income"
+    elif is_mostly_expense:
+        chart_title_prefix = "Expenses"
+    else:
+        chart_title_prefix = "Transactions"
+
     cat_totals = defaultdict(float)
     for row in data:
-        tipology = row.get("tipology", row.get("direction"))
-        if tipology not in ("Outgoing", "Expense"):
-            continue
         amount = row.get("amount")
         cat = row.get("category")
         if cat and isinstance(amount, (int, float)):
              cat_totals[cat] += abs(amount)
+    
     top_cat = max(cat_totals.items(), key=lambda x: x[1])[0] if cat_totals else "N/A"
 
     # Net Balance Widget
@@ -69,11 +79,11 @@ def render_dashboard(data):
     with st.container(border=True):
         st.plotly_chart(plot_amount_over_time(data, freq=st.session_state["time_freq"]), width="stretch", key="chart_over_time")
 
-    st.markdown("<h3 style='text-align: center;'>Expenses by Category</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3 style='text-align: center;'>{chart_title_prefix} by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
         st.plotly_chart(plot_category_pie(data), width="stretch", key="chart_category_pie")
 
-    st.markdown("<h3 style='text-align: center;'>Total Amount by Category</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3 style='text-align: center;'>Total {chart_title_prefix} by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
         st.plotly_chart(plot_category_totals(data), width="stretch", key="chart_category_totals")
 

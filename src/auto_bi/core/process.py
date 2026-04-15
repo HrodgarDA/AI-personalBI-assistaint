@@ -55,6 +55,61 @@ def _get_mode_string(source: str) -> str:
     return mapping.get(source, "🧠 LLM MODEL")
 
 
+def _print_recap(total_time: float, phases: list, records: list, failed_count: int = 0):
+    """
+    Prints a detailed recap report of the processing run.
+    - phases: list of tuples (Phase Name, duration)
+    - records: list of dictionaries with {id, merchant, duration, mode}
+    - failed_count: number of records that crashed or timed out
+    """
+    logger.info("\n" + "═"*50)
+    logger.info("📊 PROCESSING RECAP REPORT")
+    logger.info("═"*50)
+    
+    # 1. Phases
+    logger.info("\n📋 PHASES EXECUTED:")
+    for name, duration in phases:
+        logger.info(f"   - {name:<25} | {duration:>6.2f}s")
+    
+    # 2. General Stats
+    total_records = len(records)
+    avg_time = (sum(r['duration'] for r in records) / total_records) if total_records > 0 else 0
+    
+    logger.info("\n📈 GENERAL STATISTICS:")
+    logger.info(f"   - Total Processed:          {total_records + failed_count}")
+    logger.info(f"   - Successfully Extracted:   {total_records}")
+    if failed_count > 0:
+        logger.info(f"   - Failed/Timed Out:         {failed_count} ⚠️")
+    logger.info(f"   - Total Execution Time:     {total_time:.2f}s")
+    if total_records > 0:
+        logger.info(f"   - Average Speed:            {avg_time:.2f}s / record")
+    
+    # 3. Slowest Record (Bottleneck)
+    if records:
+        slowest = max(records, key=lambda x: x['duration'])
+        logger.info("\n🐢 SLOWEST TRANSACTION (Bottleneck):")
+        logger.info(f"   - ID:           {slowest['id']}")
+        logger.info(f"   - Merchant:     {slowest['merchant']}")
+        logger.info(f"   - Mode:         {slowest['mode']}")
+        logger.info(f"   - Time:         {slowest['duration']:.2f}s")
+        
+    logger.info("\n" + "═"*50 + "\n")
+
+
+def _check_llm_health() -> bool:
+    """Check if Ollama server is reachable and model is loaded."""
+    from auto_bi.utils.config import OLLAMA_BASE_URL
+    import requests
+    try:
+        # Check base connectivity
+        response = requests.get(OLLAMA_BASE_URL.replace("/v1", "/api/tags"), timeout=5)
+        if response.status_code == 200:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def save_to_silver(new_records):
     data = []
     if os.path.exists(SILVER_FILE):
@@ -196,9 +251,16 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         return
 
     logger.info(f"Starting to parse {len(to_process)} emails.")
+    # Initial Health Check
+    if not _check_llm_health():
+        logger.error("❌ CRITICAL: Ollama server is unreachable. Ensure Ollama is running.")
+        return
+
     parser = TransactionParser()
     total_extracted = 0
+    total_failed = 0
     total_emails = len(to_process)
+    all_processed_stats = []
 
     for i in range(0, len(to_process), batch_size):
         batch_start = time.time()
@@ -206,6 +268,7 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         logger.info(f"📦 Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
         
         def process_email(email):
+            t0 = time.time()
             try:
                 text = EMAIL_PROMPT_TEMPLATE.format(
                     date=email.get('date', ''),
@@ -233,6 +296,7 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                     "category_source": result.get('category_source', 'llm_inference'),
                     "confidence": result.get('confidence', 0.0),
                     "reasoning": result.get('reasoning', ''),
+                    "duration": time.time() - t0,
                 }
             except Exception as e:
                 logger.error(f"   Parsing Error ID {email['id']}: {e}")
@@ -249,10 +313,18 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                 mode_str = _get_mode_string(res.get('category_source'))
                 logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
                 batch_extracted.append(res)
+                # Track for recap
+                all_processed_stats.append({
+                    "id": res.get("original_msg_id"),
+                    "merchant": res.get("merchant"),
+                    "duration": res.get("duration", 0),
+                    "mode": mode_str
+                })
+            else:
+                total_failed += 1
 
         if batch_extracted:
             save_to_silver(batch_extracted)
-            total_extracted += len(batch_extracted)
             if progress_callback:
                 progress_callback(total_extracted, total_emails)
             
@@ -260,14 +332,13 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         logger.info(f"   Batch completed - {len(batch_extracted)} extractions - {batch_elapsed:.2f}s")
 
     elapsed = time.time() - start_time
-    logger.info("="*40)
-    logger.info("🏁 EMAIL PROCESSING SUMMARY")
-    logger.info(f"   - Total Emails Handled: {total_emails}")
-    logger.info(f"   - Total Extractions:    {total_extracted}")
-    logger.info(f"   - Total Time Elapsed:   {elapsed:.2f}s")
-    if total_extracted > 0:
-        logger.info(f"   - Speed (avg):         {elapsed/total_extracted:.2f}s / extraction")
-    logger.info("="*40)
+    # Use the new recap report
+    _print_recap(
+        total_time=elapsed,
+        phases=[("Email Processing", elapsed)],
+        records=all_processed_stats,
+        failed_count=total_failed
+    )
 
 def run_excel_processing(batch_size: int = 5, progress_callback=None):
     start_time = time.time()
@@ -294,9 +365,16 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
         return
         
     logger.info(f"Starting to parse {len(to_process)} excel occurrences.")
+    # Initial Health Check
+    if not _check_llm_health():
+        logger.error("❌ CRITICAL: Ollama server is unreachable. Ensure Ollama is running.")
+        return
+
     parser = TransactionParser()
     total_extracted = 0
+    total_failed = 0
     total_rows = len(to_process)
+    all_processed_stats = []
     
     for i in range(0, len(to_process), batch_size):
         batch_start = time.time()
@@ -304,6 +382,7 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
         logger.info(f"📦 Excel Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
         
         def process_record(record):
+            t0 = time.time()
             try:
                 operation = record.get("operation", "")
                 details = record.get("details", "")
@@ -337,6 +416,7 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
                     "category_source": result.get('category_source', 'llm_inference'),
                     "confidence": result.get('confidence', 0.0),
                     "reasoning": result.get('reasoning', ''),
+                    "duration": time.time() - t0,
                 }
             except Exception as e:
                 logger.error(f"   Excel Parsing Error ID {record.get('id')}: {e}")
@@ -353,6 +433,15 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
                 mode_str = _get_mode_string(res.get('category_source'))
                 logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
                 batch_extracted.append(res)
+                # Track for recap
+                all_processed_stats.append({
+                    "id": res.get("original_msg_id"),
+                    "merchant": res.get("merchant"),
+                    "duration": res.get("duration", 0),
+                    "mode": mode_str
+                })
+            else:
+                total_failed += 1
 
         if batch_extracted:
             save_to_silver(batch_extracted)
@@ -363,11 +452,10 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
         logger.info(f"   Batch completed - {len(batch_extracted)} extractions - {batch_elapsed:.2f}s")
 
     elapsed = time.time() - start_time
-    logger.info("="*40)
-    logger.info("🏁 EXCEL PROCESSING SUMMARY")
-    logger.info(f"   - Total Excel Rows Handled: {total_rows}")
-    logger.info(f"   - Total Classifications:    {total_extracted}")
-    logger.info(f"   - Total Time Elapsed:       {elapsed:.2f}s")
-    if total_extracted > 0:
-        logger.info(f"   - Speed (avg):             {elapsed/total_extracted:.2f}s / row")
-    logger.info("="*40)
+    # Use the new recap report
+    _print_recap(
+        total_time=elapsed,
+        phases=[("Excel Processing", elapsed)],
+        records=all_processed_stats,
+        failed_count=total_failed
+    )

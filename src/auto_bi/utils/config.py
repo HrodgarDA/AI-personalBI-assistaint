@@ -3,6 +3,8 @@ import os
 # --- MODEL SETTINGS ---
 MODEL_ID = "gemma4-e4b-4bit"
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
+LLM_TIMEOUT = 60  # Seconds to wait for AI response
+MAX_RETRIES = 2   # Number of times to retry a failed LLM call
 
 # --- SEARCH SETTINGS ---
 SEARCH_TIMEOUT = 8

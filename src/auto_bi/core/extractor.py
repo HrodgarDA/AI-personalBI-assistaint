@@ -4,13 +4,17 @@ import re
 import logging
 import instructor
 import subprocess
+import time
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Any, Optional
 from pydantic import BaseModel
 from auto_bi.utils.models import OutgoingClassification, IncomingClassification
 from auto_bi.utils.prompts import OUTGOING_CLASSIFICATION_PROMPT, INCOMING_CLASSIFICATION_PROMPT, MERCHANT_EXTRACTION_PROMPT
-from auto_bi.utils.config import MODEL_ID, OLLAMA_BASE_URL, SEARCH_TIMEOUT, SEARCH_BACKENDS, MERCHANT_CATALOGUE, BRONZE_FILE
+from auto_bi.utils.config import (
+    MODEL_ID, OLLAMA_BASE_URL, SEARCH_TIMEOUT, SEARCH_BACKENDS, 
+    MERCHANT_CATALOGUE, BRONZE_FILE, LLM_TIMEOUT, MAX_RETRIES
+)
 from auto_bi.utils.utils import clean_search_query, is_valid_search_query, normalize_merchant_name
 
 load_dotenv()
@@ -197,19 +201,27 @@ class TransactionParser:
 
         # 1. Merchant extraction (only if not provided)
         if not merchant:
-            try:
-                merchant_res = self.client.chat.completions.create(
-                    model=self.model,
-                    temperature=0.0,
-                    response_model=MerchantExtraction,
-                    messages=[
-                        {"role": "system", "content": MERCHANT_EXTRACTION_PROMPT},
-                        {"role": "user", "content": text},
-                    ],
-                )
-                merchant = merchant_res.merchant
-            except Exception:
-                merchant = "Unknown"
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    merchant_res = self.client.chat.completions.create(
+                        model=self.model,
+                        temperature=0.0,
+                        response_model=MerchantExtraction,
+                        messages=[
+                            {"role": "system", "content": MERCHANT_EXTRACTION_PROMPT},
+                            {"role": "user", "content": text},
+                        ],
+                        timeout=LLM_TIMEOUT
+                    )
+                    merchant = merchant_res.merchant
+                    break
+                except Exception as e:
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"   ⚠️ Merchant extraction failed (Attempt {attempt+1}/{MAX_RETRIES+1}). Retrying in 2s...")
+                        time.sleep(2)
+                    else:
+                        logger.error(f"   ❌ Merchant extraction failed after {MAX_RETRIES+1} attempts: {e}")
+                        merchant = "Unknown"
 
         if merchant and merchant.lower() != "unknown":
             m_key = merchant.strip().lower()
@@ -261,15 +273,28 @@ class TransactionParser:
         elif merchant_hint:
             system_prompt += f"\nWeb hint for merchant '{merchant}': {merchant_hint}"
 
-        result = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.0,
-            response_model=model_class,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
-            ],
-        )
+        # Call LLM with retries and timeout
+        result = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                result = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0.0,
+                    response_model=model_class,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                    ],
+                    timeout=LLM_TIMEOUT
+                )
+                break
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"   ⚠️ LLM classification failed (Attempt {attempt+1}/{MAX_RETRIES+1}). Retrying in 2s...")
+                    time.sleep(2)
+                else:
+                    logger.error(f"   ❌ LLM classification FAILED after {MAX_RETRIES+1} attempts: {e}")
+                    raise e # Re-raise to be caught by the process caller
 
         classified_category = result.category.value
 
