@@ -6,6 +6,7 @@ from datetime import datetime
 import pandas as pd
 from auto_bi.utils.gmail_client import GmailScraper
 from auto_bi.utils.config import BRONZE_FILE, BRONZE_EXCEL
+from auto_bi.utils.bank_profile import load_bank_profile
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +68,13 @@ def run_ingestion(progress_callback=None):
         logger.info("No Bronze file found: downloading all available emails.")
         query_addon = ""
 
+    profile = load_bank_profile()
+    target_email = profile.bank_sender_email or os.getenv('BANK_SENDER_EMAIL')
+    
     scraper = GmailScraper()
     existing_bronze_ids = get_already_processed_ids(BRONZE_FILE)
 
-    raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=query_addon)
+    raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=query_addon, target_email=target_email)
     new_emails = []
     total_raw = len(raw_emails)
     for i, email in enumerate(raw_emails):
@@ -110,24 +114,28 @@ def ingest_excel(uploaded_file, progress_callback=None):
     logger.info("="*40)
     os.makedirs("data", exist_ok=True)
     
+    profile = load_bank_profile()
+    skip_rows = profile.skip_rows
+    mapping = profile.column_mapping
+
     try:
-        # Load excel skipping first 18 rows. Row 19 becomes header (index 0).
-        df = pd.read_excel(uploaded_file, skiprows=18)
+        # Load excel skipping rows from profile.
+        df = pd.read_excel(uploaded_file, skiprows=skip_rows)
     except Exception as e:
         logger.error(f"Failed to read excel file: {e}")
         return 0
         
-    expected_cols = ["Data", "Operazione", "Dettagli", "Importo"]
+    expected_cols = [mapping.date, mapping.operation, mapping.amount]
     for col in expected_cols:
         if col not in df.columns:
-            logger.error(f"Missing expected column '{col}' in the uploaded excel.")
+            logger.error(f"Missing expected column '{col}' in the uploaded excel. Check Settings.")
             return 0
             
     # Remove empty rows based on necessary columns
-    df = df.dropna(subset=["Data", "Operazione", "Importo"])
+    df = df.dropna(subset=[mapping.date, mapping.operation, mapping.amount])
     
-    # Check if 'Categoria' column exists for bank_category_hint
-    has_bank_category = "Categoria" in df.columns
+    # Check if category hint column exists
+    has_bank_category = mapping.category_hint in df.columns if mapping.category_hint else False
     
     new_records = []
     
@@ -143,24 +151,24 @@ def ingest_excel(uploaded_file, progress_callback=None):
         if progress_callback:
             progress_callback(int(idx) + 1, total_df)
             
-        date_str = str(row["Data"]).split(" ")[0] # ensure YYYY-MM-DD formatting loosely if it's a datetime
+        raw_date = row[mapping.date]
         # More robust date handling:
         try:
-            if pd.api.types.is_datetime64_any_dtype(df['Data']):
-                parsed_dt = row["Data"]
+            if pd.api.types.is_datetime64_any_dtype(df[mapping.date]):
+                parsed_dt = raw_date
             else:
-                parsed_dt = pd.to_datetime(row["Data"], format="%d/%m/%Y", errors="coerce")
+                parsed_dt = pd.to_datetime(raw_date, format=profile.date_format, errors="coerce")
             
             if pd.notna(parsed_dt):
                 date_str = parsed_dt.strftime("%Y-%m-%d")
             else:
-                date_str = str(row["Data"])
+                date_str = str(raw_date)
         except:
-            date_str = str(row["Data"])
+            date_str = str(raw_date)
             
-        operation = str(row["Operazione"])
-        details = str(row["Dettagli"]) if pd.notna(row["Dettagli"]) else ""
-        amount = float(row["Importo"]) if pd.notna(row["Importo"]) else 0.0
+        operation = str(row[mapping.operation])
+        details = str(row[mapping.details]) if mapping.details in df.columns and pd.notna(row[mapping.details]) else ""
+        amount = float(row[mapping.amount]) if pd.notna(row[mapping.amount]) else 0.0
         
         # Create an ID hash including the index to distinguish consecutive identical transactions
         hash_string = f"{date_str}_{operation}_{amount}_{idx}".encode('utf-8')
@@ -169,14 +177,12 @@ def ingest_excel(uploaded_file, progress_callback=None):
         if pseudo_id in existing_bronze_ids:
             continue
             
-        # Find the category hint (handle case-insensitive or extra spaces)
+        # Find the category hint
         bank_category = ""
-        for col in df.columns:
-            if str(col).strip().lower() == "categoria":
-                val = row[col]
-                if pd.notna(val) and str(val).strip().lower() not in ["", "nan", "n.d."]:
-                    bank_category = str(val).strip()
-                break
+        if has_bank_category and mapping.category_hint:
+            val = row[mapping.category_hint]
+            if pd.notna(val) and str(val).strip().lower() not in ["", "nan", "n.d."]:
+                bank_category = str(val).strip()
         
         record = {
             "id": pseudo_id,

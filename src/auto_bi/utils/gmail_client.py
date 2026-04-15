@@ -31,11 +31,13 @@ class GmailScraper:
                 token.write(creds.to_json())
         return build('gmail', 'v1', credentials=creds)
 
-    def fetch_expense_emails(self, max_results: int = 100, query_addon: str = "") -> List[Dict[str, str]]:
+    def fetch_expense_emails(self, max_results: int = 100, query_addon: str = "", target_email: str = None) -> List[Dict[str, str]]:
         """
         Scarica le email con supporto alla paginazione per superare il limite dei 100 risultati.
         """
-        target_email = os.getenv('BANK_SENDER_EMAIL')
+        if not target_email:
+            target_email = os.getenv('BANK_SENDER_EMAIL')
+            
         query = f"from:{target_email} {query_addon}".strip()
         
         extracted_data = []

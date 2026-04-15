@@ -16,19 +16,15 @@ from auto_bi.utils.config import (
     MERCHANT_CATALOGUE, BRONZE_FILE, LLM_TIMEOUT, MAX_RETRIES
 )
 from auto_bi.utils.utils import clean_search_query, is_valid_search_query, normalize_merchant_name
+from auto_bi.utils.bank_profile import load_bank_profile
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Patterns that indicate the merchant name is NOT a real searchable merchant
-INVALID_MERCHANT_PATTERNS = [
-    r'^\d{10,}',                       # Long numeric codes (bank codes)
-    r'^\d+\s*\d*INTER',               # Interbank codes like "0126032595442537 02INTER..."
-    r'^COD\.?\s*DISP',                # "COD.DISP. 0126032514843211"
-    r'^EFFETTUATO\s+IL',              # "EFFETTUATO IL 31/03/2026..."
+UNIVERSAL_INVALID_PATTERNS = [
+    r'^\d{10,}',                       # Long numeric codes
     r'^N\.?D\.?$',                     # "N.D" (not available)
-    r'^CARTA\s+\d+',                   # Card references
-    r'^ALLE\s+ORE',                    # "ALLE ORE 1234"
     r'^\d{2}/\d{2}/\d{4}',            # Dates 
 ]
 
@@ -42,6 +38,7 @@ class TransactionParser:
     def __init__(self):
         self.model = MODEL_ID
         self._ensure_model_available()
+        self.profile = load_bank_profile()
         self.client = instructor.from_openai(
             OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama"),
             mode=instructor.Mode.JSON,
@@ -267,6 +264,10 @@ class TransactionParser:
 
         feedback = self._build_feedback_context()
         system_prompt = system_prompt.replace("{user_feedback_examples}", feedback)
+        
+        # Inject custom user prompt from profile
+        custom_rules = f"\nUSER CUSTOM RULES:\n{self.profile.custom_prompt}" if self.profile.custom_prompt else ""
+        system_prompt = system_prompt.replace("{custom_user_rules}", custom_rules)
         
         if historical_category:
             system_prompt += f"\nVERIFIED HISTORICAL CATEGORY for '{merchant}': {historical_category}. Favor this category unless the text strongly indicates otherwise."

@@ -27,15 +27,16 @@ OUTGOING_CLASSIFICATION_PROMPT = (
     "1. KFC/McDonald's -> Dining. Zara/Amazon -> Shopping. Supermarkets -> Groceries.\n"
     "2. If the merchant is 'PayPal', look at the other text to find the actual store.\n"
     "3. Explain your reasoning in the 'reasoning' field before picking the category.\n"
-    "{user_feedback_examples}"
+    "{user_feedback_examples}\n"
+    "{custom_user_rules}"
 )
 
 MERCHANT_EXTRACTION_PROMPT = (
     "Extract ONLY the merchant name (the store or person name) from this bank transaction text.\n"
     "Rules:\n"
-    "- Remove all technical codes (e.g., '0126...', 'N.D.', 'COD.DISP').\n"
-    "- Remove dates and times (e.g., '31/03/2026', 'ALLE ORE').\n"
-    "- Remove generic banking prefixes (e.g., 'PAGAMENTO CARTA', 'ACQUISTO').\n"
+    "- Remove all technical codes and noise patterns.\n"
+    "- Remove dates and times.\n"
+    "- Remove generic banking prefixes (e.g., 'PAGAMENTO', 'ACQUISTO').\n"
     "- If it's a PayPal transaction (e.g., 'PAYPAL *ZARA'), extract BOTH: 'PayPal *Zara'.\n"
     "- If unknown, output 'Unknown'.\n"
     "Output ONLY the name, nothing else."
@@ -54,5 +55,6 @@ INCOMING_CLASSIFICATION_PROMPT = (
     "- 'Storno Pagamento' (reversal/refund) -> Refund\n"
     "- 'Bonifico A Vostro Favore' (transfer received) -> Transfer\n\n"
     "Return ONLY a valid JSON object with: 'category', 'amount' (POSITIVE number), 'confidence', and 'reasoning'.\n"
-    "{user_feedback_examples}"
+    "{user_feedback_examples}\n"
+    "{custom_user_rules}"
 )

@@ -10,6 +10,7 @@ from auto_bi.utils.prompts import EMAIL_PROMPT_TEMPLATE
 from auto_bi.core.ingestion import get_already_processed_ids
 from auto_bi.utils.config import BRONZE_FILE, BRONZE_EXCEL, SILVER_FILE, GOLD_FILE
 from auto_bi.utils.utils import extract_merchant_from_excel
+from auto_bi.utils.bank_profile import load_bank_profile
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +32,10 @@ def _determine_direction(text: str, amount: float = None) -> str:
         return "Incoming" if amount >= 0 else "Outgoing"
     
     text_lower = text.lower()
-    incoming_patterns = [
-        "a vostro favore",       # "Bonifico A Vostro Favore Disposto Da"
-        "accredito",             # Account credit
-        "stipendio",             # Salary
-        "storno pagamento",      # Payment reversal / refund
-        "storno",                # Generic reversal
-        "rimborso",              # Refund
-    ]
-    for pattern in incoming_patterns:
-        if pattern in text_lower:
+    profile = load_bank_profile()
+    
+    for pattern in profile.incoming_keywords:
+        if pattern.lower() in text_lower:
             return "Incoming"
     return "Outgoing"
 
