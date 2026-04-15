@@ -112,6 +112,43 @@ def clean_search_query(merchant_name: str) -> str:
     return clean
 
 
+def normalize_merchant_name(name: str) -> str:
+    """
+    Aggressive normalization for catalogue lookup.
+    Example: 'PAYPAL *ZARA 6' -> 'zara'
+    """
+    if not name: return ""
+    
+    # 1. Lowercase and basic trim
+    clean = name.lower().strip()
+    
+    # 2. Remove common prefixes and noise
+    noise_patterns = [
+        r'^paypal\s*\*?\s*',
+        r'^sumup\s*\*?\s*',
+        r'^pagamento\s+(?:su\s+)?pos\s*',
+        r'^pos\s+',
+        r'^storno\s+',
+        r'\b(?:s\.?r\.?l\.?|s\.?p\.?a\.?|s\.?n\.?c\.?|s\.?a\.?s\.?)\b', # Business entities
+    ]
+    for pattern in noise_patterns:
+        clean = re.sub(pattern, ' ', clean, flags=re.IGNORECASE)
+        
+    # 3. Remove dates (DD/MM or DD/MM/YYYY)
+    clean = re.sub(r'\d{2}/\d{2}(?:\d{4})?\b', ' ', clean)
+    
+    # 4. Remove all remaining numbers
+    clean = re.sub(r'\d+', ' ', clean)
+    
+    # 5. Remove special characters (except spaces)
+    clean = re.sub(r'[^\w\s]', ' ', clean)
+    
+    # 6. Collapse spaces
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    
+    return clean
+
+
 def is_valid_search_query(query: str) -> bool:
     """Heuristic to skip web searches for private person names."""
     if not query or len(query) < 3:

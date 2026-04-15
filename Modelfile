@@ -1,8 +1,8 @@
-# Ollama Modelfile per Gemma 4 E2B a 4-bit
-# L'espressione "gemma:2b" tira autonomamente la versione quantizzata a 4-bit (q4_0) dal registry di Ollama.
+# Ollama Modelfile per Gemma 4 E4B a 4-bit
+# L'espressione "gemma4:e4b" tira autonomamente la versione quantizzata a 4-bit dal registry di Ollama.
 # Nel caso in cui venga fornito un .gguf esatto scaricato, commentare la prima riga e usare la seconda.
-FROM gemma:2b
-# FROM ./gemma4-e2b-4bit.gguf
+FROM gemma4:e4b
+# FROM ./gemma4-e4b-4bit.gguf
 
 # Parametri ottimali per assicurare la massima riproducibilità nei JSON parserizzati.
 PARAMETER temperature 0.0

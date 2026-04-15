@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from typing import Any, Optional
 from pydantic import BaseModel
 from auto_bi.utils.models import OutgoingClassification, IncomingClassification
-from auto_bi.utils.prompts import OUTGOING_CLASSIFICATION_PROMPT, INCOMING_CLASSIFICATION_PROMPT
+from auto_bi.utils.prompts import OUTGOING_CLASSIFICATION_PROMPT, INCOMING_CLASSIFICATION_PROMPT, MERCHANT_EXTRACTION_PROMPT
 from auto_bi.utils.config import MODEL_ID, OLLAMA_BASE_URL, SEARCH_TIMEOUT, SEARCH_BACKENDS, MERCHANT_CATALOGUE, BRONZE_FILE
-from auto_bi.utils.utils import clean_search_query, is_valid_search_query
+from auto_bi.utils.utils import clean_search_query, is_valid_search_query, normalize_merchant_name
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -44,7 +44,8 @@ class TransactionParser:
         )
         self.cache_path = MERCHANT_CATALOGUE
         self.merchant_cache = self._load_cache()
-
+        # Build optimized lookup map for normalized names
+        self.normalized_cache = {normalize_merchant_name(k): v for k, v in self.merchant_cache.items() if normalize_merchant_name(k)}
 
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_path):
@@ -60,24 +61,35 @@ class TransactionParser:
             os.makedirs("data", exist_ok=True)
             with open(self.cache_path, "w", encoding="utf-8") as f:
                 json.dump(self.merchant_cache, f, indent=2, ensure_ascii=False)
+            # Rebuild normalized cache
+            self.normalized_cache = {normalize_merchant_name(k): v for k, v in self.merchant_cache.items() if normalize_merchant_name(k)}
         except Exception as e:
             logger.warning(f"Error saving merchant cache: {e}")
 
     def _ensure_model_available(self):
         """Verifica se il modello Ollama esiste localmente, altrimenti lo crea dal Modelfile."""
+        # Common paths for ollama CLI on macOS/Linux
+        ollama_bin = "ollama"
+        possible_paths = ["ollama", "/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/usr/bin/ollama"]
+        
+        for path in possible_paths:
+            try:
+                subprocess.run([path, "list"], capture_output=True, text=True, timeout=2)
+                ollama_bin = path
+                break
+            except (subprocess.SubprocessError, FileNotFoundError):
+                continue
+
         try:
-            # Check if ollama is reachable before trying to list models
-            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([ollama_bin, "list"], capture_output=True, text=True, timeout=5)
             if self.model not in result.stdout:
                 modelfile_path = "Modelfile"
                 if os.path.exists(modelfile_path):
-                    logger.info(f"Modello '{self.model}' non trovato. Creazione in corso dal Modelfile...")
-                    subprocess.run(["ollama", "create", self.model, "-f", modelfile_path], check=True)
+                    logger.info(f"Modello '{self.model}' non trovato. Creazione in corso dal Modelfile utilizzando '{ollama_bin}'...")
+                    subprocess.run([ollama_bin, "create", self.model, "-f", modelfile_path], check=True)
                 else:
                     logger.warning(f"Attenzione: Modelfile non trovato. Impossibile creare '{self.model}'.")
         except (subprocess.SubprocessError, FileNotFoundError):
-             # Silently fail if ollama CLI is not found; 
-             # the OpenAI client will fail later with a better error message if the server is down.
              logger.debug("Ollama CLI not found or unreachable. Skipping pre-check.")
         except Exception as e:
             logger.warning(f"Errore durante il controllo del modello Ollama: {e}")
@@ -166,7 +178,7 @@ class TransactionParser:
                         ))
                         if results:
                             snippet = results[0].get('body', '')
-                            logger.info(f"   🔍 Web search OK ({backend}): '{clean_query}' -> hint retrieved")
+                            logger.debug(f"   🔍 Web search OK ({backend}): '{clean_query}' -> hint retrieved")
                             return snippet[:200]
                 except Exception as e:
                     logger.debug(f"   Web search failed on {backend}: {e}")
@@ -176,7 +188,7 @@ class TransactionParser:
         
         return ""
 
-    def classify_transaction(self, text: str, direction: str, merchant: str = None) -> dict:
+    def classify_transaction(self, text: str, direction: str, merchant: str = None, amount: float = None) -> dict:
         """
         Unified transaction classification with catalogue-first logic and source tracking.
         """
@@ -191,7 +203,7 @@ class TransactionParser:
                     temperature=0.0,
                     response_model=MerchantExtraction,
                     messages=[
-                        {"role": "system", "content": "Extract ONLY the merchant name (store name) from this text. No dates, no codes. If unknown, output 'Unknown'."},
+                        {"role": "system", "content": MERCHANT_EXTRACTION_PROMPT},
                         {"role": "user", "content": text},
                     ],
                 )
@@ -199,13 +211,32 @@ class TransactionParser:
             except Exception:
                 merchant = "Unknown"
 
-        # 2. Check persistent Catalogue for refined category
         if merchant and merchant.lower() != "unknown":
             m_key = merchant.strip().lower()
+            m_normalized = normalize_merchant_name(m_key)
+            
+            # Fast Exact Match
             if m_key in self.merchant_cache:
                 historical_category = self.merchant_cache[m_key]
                 category_source = "from_catalogue"
-                logger.info(f"   📂 Catalogue MATCH: '{merchant}' -> '{historical_category}'")
+                logger.debug(f"   📂 Catalogue MATCH: '{merchant}' -> '{historical_category}'")
+            # Fast Normalized Match (O(1) instead of O(M))
+            elif m_normalized in self.normalized_cache:
+                historical_category = self.normalized_cache[m_normalized]
+                category_source = "from_catalogue"
+                logger.debug(f"   📂 Catalogue SMART MATCH: '{merchant}' -> '{historical_category}'")
+
+        # 2c. LLM BYPASS: If we already have the category and the amount, skip the AI
+        if historical_category and amount is not None:
+             logger.debug(f"   ⚡ BYPASS AI: Using cached category '{historical_category}' for '{merchant}'")
+             return {
+                "category": historical_category,
+                "merchant": merchant,
+                "amount": amount,
+                "confidence": 1.0,
+                "reasoning": "Determined from merchant catalogue (LLM bypass).",
+                "category_source": "from_catalogue"
+            }
 
         # 3. Web search hint (only if NOT in catalogue)
         merchant_hint = ""
@@ -245,8 +276,20 @@ class TransactionParser:
         # 5. Update catalogue with the final result (Skip likely person names)
         if merchant and merchant.lower() != "unknown" and is_valid_search_query(merchant):
             m_key = merchant.strip().lower()
-            # Only update if it's new or if we used web_search/llm to determine it
-            if m_key not in self.merchant_cache or category_source != "from_catalogue":
+            m_normalized = normalize_merchant_name(m_key)
+            
+            # Check if we already have a normalized match to avoid redundant entries
+            already_has_normalized = False
+            if category_source == "from_catalogue":
+                already_has_normalized = True
+            else:
+                if m_normalized:
+                    for cat_key in self.merchant_cache:
+                        if normalize_merchant_name(cat_key) == m_normalized:
+                            already_has_normalized = True
+                            break
+            
+            if not already_has_normalized:
                 self.merchant_cache[m_key] = classified_category
                 self._save_cache()
 

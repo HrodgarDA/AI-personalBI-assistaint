@@ -44,10 +44,29 @@ def _base_layout(theme: dict, xaxis_title=None, yaxis_title=None):
         margin=dict(l=40, r=40, t=80, b=80)
     )
 
+CATEGORY_EMOJI = {
+    "Dining": "🍽️",
+    "Financial": "🏦",
+    "Gifts": "🎁",
+    "Groceries": "🛒",
+    "Health": "💊",
+    "Home": "🏠",
+    "Other": "📦",
+    "Shopping": "🛍️",
+    "Subscriptions": "🔄",
+    "Transport": "🚗",
+    "Utilities": "⚡",
+    "Salary": "💰",
+    "Refund": "↩️",
+}
+
 def plot_category_totals(data):
     theme = get_theme()
     totals = defaultdict(float)
     for row in data:
+        tipology = row.get("tipology", row.get("direction"))
+        if tipology not in ("Outgoing", "Expense"):
+            continue
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):
@@ -58,27 +77,33 @@ def plot_category_totals(data):
         fig.update_layout(_base_layout(theme, xaxis_title="No data available"))
         return fig
 
-    labels, values = zip(*sorted(totals.items(), key=lambda item: item[1], reverse=True))
-    labels = [str(label) for label in labels]
-    values = [float(value) for value in values]
+    # Sort ascending so largest category is at the top in horizontal layout
+    sorted_items = sorted(totals.items(), key=lambda item: item[1])
+    labels = [f"{CATEGORY_EMOJI.get(cat, '📌')} {cat}" for cat, _ in sorted_items]
+    values = [float(val) for _, val in sorted_items]
     
+    # Generate a color per bar from the palette
+    bar_colors = [theme["palette"][i % len(theme["palette"])] for i in range(len(labels))]
+
     fig = go.Figure(
         data=go.Bar(
-            x=labels, 
-            y=values, 
-            marker_color=theme["palette"][0],
+            y=labels, 
+            x=values,
+            orientation='h',
+            marker_color=bar_colors,
             marker_line_width=0,
-            texttemplate="%{y:.2f} €",
+            texttemplate="%{x:,.2f} €",
             textposition="outside",
-            hovertemplate="<b>%{x}</b><br>Amount: %{y:.2f} €<extra></extra>"
+            hovertemplate="<b>%{y}</b><br>Amount: %{x:,.2f} €<extra></extra>"
         )
     )
     
     max_val = max(values) if values else 100
     fig.update_layout(
-        _base_layout(theme, yaxis_title="Amount (€)"),
-        xaxis_tickangle=-30,
-        yaxis=dict(range=[0, max_val * 1.2])  # 20% headroom
+        _base_layout(theme, xaxis_title="Amount (€)"),
+        xaxis=dict(range=[0, max_val * 1.25]),
+        height=max(400, len(labels) * 45 + 100),
+        yaxis=dict(automargin=True),
     )
     return fig
 
@@ -87,6 +112,9 @@ def plot_category_pie(data):
     theme = get_theme()
     totals = defaultdict(float)
     for row in data:
+        tipology = row.get("tipology", row.get("direction"))
+        if tipology not in ("Outgoing", "Expense"):
+            continue
         amount = row.get("amount")
         category = row.get("category")
         if category and isinstance(amount, (int, float)):
@@ -132,10 +160,9 @@ def plot_amount_over_time(data, freq="D"):
             elif freq == "M":
                 parsed = parsed.replace(day=1)
                 
-            # New logic: Incoming vs Outgoing (with backward compat)
             if tipology == "Incoming" or tipology == "Salary":
                 daily_incoming[parsed] += abs(amount)
-            else:  # Outgoing, Expense, Refund, or any other
+            else:
                 daily_outgoing[parsed] += abs(amount)
 
     all_dates = sorted(set(list(daily_incoming.keys()) + list(daily_outgoing.keys())))
@@ -150,36 +177,48 @@ def plot_amount_over_time(data, freq="D"):
     else:
         x_labels = all_dates
 
-    y_incoming = [float(daily_incoming.get(d, 0.0)) for d in all_dates]
-    y_outgoing = [float(daily_outgoing.get(d, 0.0)) for d in all_dates]
+    # Build cumulative sums
+    cum_incoming = []
+    cum_outgoing = []
+    running_in = 0.0
+    running_out = 0.0
+    for d in all_dates:
+        running_in += float(daily_incoming.get(d, 0.0))
+        running_out += float(daily_outgoing.get(d, 0.0))
+        cum_incoming.append(running_in)
+        cum_outgoing.append(running_out)
 
     fig = go.Figure()
     
-    has_incoming = any(y > 0 for y in y_incoming)
+    has_incoming = any(y > 0 for y in cum_incoming)
     
     if has_incoming:
         fig.add_trace(go.Scatter(
             x=x_labels, 
-            y=y_incoming, 
-            name="Incoming",
+            y=cum_incoming, 
+            name="Cumulative Incoming",
             mode="lines+markers", 
             line=dict(color=theme["palette"][1], width=3, shape='spline'),
-            marker=dict(size=8, color=theme["palette"][1], line=dict(width=1, color=theme["bg_color"])),
-            hovertemplate="<b>%{x}</b><br>Incoming: %{y:.2f} €<extra></extra>"
+            marker=dict(size=6, color=theme["palette"][1], line=dict(width=1, color=theme["bg_color"])),
+            fill='tozeroy',
+            fillcolor='rgba(52, 211, 153, 0.1)',
+            hovertemplate="<b>%{x}</b><br>Cumulative Incoming: %{y:.2f} €<extra></extra>"
         ))
         
     fig.add_trace(go.Scatter(
         x=x_labels, 
-        y=y_outgoing, 
-        name="Outgoing",
+        y=cum_outgoing, 
+        name="Cumulative Outgoing",
         mode="lines+markers", 
         line=dict(color=theme["palette"][3], width=3, shape='spline'),
-        marker=dict(size=8, color=theme["palette"][3], line=dict(width=1, color=theme["bg_color"])),
-        hovertemplate="<b>%{x}</b><br>Outgoing: %{y:.2f} €<extra></extra>"
+        marker=dict(size=6, color=theme["palette"][3], line=dict(width=1, color=theme["bg_color"])),
+        fill='tozeroy',
+        fillcolor='rgba(248, 113, 113, 0.1)',
+        hovertemplate="<b>%{x}</b><br>Cumulative Outgoing: %{y:.2f} €<extra></extra>"
     ))
     
     fig.update_layout(
-        _base_layout(theme, xaxis_title="Date", yaxis_title="Amount (€)"),
+        _base_layout(theme, xaxis_title="Date", yaxis_title="Cumulative Amount (€)"),
         hovermode="x unified"
     )
     return fig

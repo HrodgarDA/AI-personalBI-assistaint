@@ -11,16 +11,17 @@ class Tipology(str, Enum):
 
 class OutgoingCategory(str, Enum):
     """Categories for outgoing transactions (money leaving the account)."""
-    Subscriptions = "Utilities & Subscriptions"
-    Bills = "Bills for the house"
-    Entertainment = "Dining & Entertainment"
+    Subscriptions = "Subscriptions"
+    Utilities = "Utilities"
+    Home = "Home"
+    Dining = "Dining"
     Shopping = "Shopping"
-    Health = "Health & Fitness"
-    Transport = "Transport & Fuel"
-    Supermarket = "Supermarket"
-    Savings = "Savings & Investments"
+    Health = "Health"
+    Transport = "Transport"
+    Groceries = "Groceries"
+    Savings = "Savings"
     Gifts = "Gifts"
-    Transfers = "Transfers & Settlements"
+    Financial = "Financial"
     Other = "Other"
 
 
@@ -35,15 +36,15 @@ class IncomingCategory(str, Enum):
 
 class OutgoingClassification(BaseModel):
     """LLM classification result for outgoing transactions."""
+    reasoning: Optional[str] = Field(None, description="Step-by-step reasoning")
     category: OutgoingCategory = Field(..., description="Expense category")
-    amount: Optional[float] = Field(None, description="Transaction amount (negative). Extract from text if visible.")
-    confidence: float = Field(..., description="Classification confidence 0-1")
-    reasoning: Optional[str] = Field(None, description="Brief reasoning for the classification")
+    amount: Optional[float] = Field(None, description="Transaction amount (negative)")
+    confidence: Optional[float] = Field(0.0, description="Classification confidence 0-1")
 
 
 class IncomingClassification(BaseModel):
     """LLM classification result for incoming transactions."""
+    reasoning: Optional[str] = Field(None, description="Step-by-step reasoning")
     category: IncomingCategory = Field(..., description="Income category")
-    amount: Optional[float] = Field(None, description="Transaction amount (positive). Extract from text if visible.")
-    confidence: float = Field(..., description="Classification confidence 0-1")
-    reasoning: Optional[str] = Field(None, description="Brief reasoning for the classification")
+    amount: Optional[float] = Field(None, description="Transaction amount (positive)")
+    confidence: Optional[float] = Field(0.0, description="Classification confidence 0-1")

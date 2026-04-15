@@ -18,11 +18,13 @@ credentials.json
 token.json
 
 # --- Data (Ignored to keep repo small/private) ---
-data/bronze_raw_emails.jsonl
-data/silver_expenses.json
-data/gold_certified_data.csv
-data/merchant_catalogue.json
+data/
+scratch/
 
 # --- Editor ---
 .vscode/
 .idea/
+src/auto_bi/scripts/test_classification.py
+src/auto_bi/scripts/migrate_categories.py
+
+

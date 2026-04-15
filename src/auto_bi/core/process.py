@@ -4,6 +4,7 @@ import logging
 import csv
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from auto_bi.core.extractor import TransactionParser
 from auto_bi.utils.prompts import EMAIL_PROMPT_TEMPLATE
 from auto_bi.core.ingestion import get_already_processed_ids
@@ -42,6 +43,16 @@ def _determine_direction(text: str, amount: float = None) -> str:
         if pattern in text_lower:
             return "Incoming"
     return "Outgoing"
+
+
+def _get_mode_string(source: str) -> str:
+    """Map category source to a user-friendly mode string with emoji."""
+    mapping = {
+        "from_catalogue": "⚡ BYPASS MODEL",
+        "web_search": "🔍 WEB SEARCH",
+        "llm_inference": "🧠 LLM MODEL"
+    }
+    return mapping.get(source, "🧠 LLM MODEL")
 
 
 def save_to_silver(new_records):
@@ -193,9 +204,8 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         batch_start = time.time()
         batch = to_process[i:i + batch_size]
         logger.info(f"📦 Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
-        batch_extracted = []
-
-        for email in batch:
+        
+        def process_email(email):
             try:
                 text = EMAIL_PROMPT_TEMPLATE.format(
                     date=email.get('date', ''),
@@ -204,16 +214,14 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                     details=email.get('details', ''),
                 )
                 canonical_date = email.get('date', '')
-                
-                # Pre-determine direction from email keywords
                 direction = _determine_direction(
                     email.get('operation', '') + ' ' + email.get('details', '')
                 )
 
-                # Unified classification (merchant extracted by LLM)
+                # Unified classification
                 result = parser.classify_transaction(text, direction)
 
-                record = {
+                return {
                     "original_msg_id": email['id'],
                     "tipology": direction,
                     "merchant": result.get('merchant', 'Unknown'),
@@ -226,10 +234,21 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                     "confidence": result.get('confidence', 0.0),
                     "reasoning": result.get('reasoning', ''),
                 }
-                batch_extracted.append(record)
-                logger.info(f"   [{direction[:3].upper()}] {record['amount']}€ | {record['merchant'][:15]:<15} | {record['category']}")
             except Exception as e:
                 logger.error(f"   Parsing Error ID {email['id']}: {e}")
+                return None
+
+        results = []
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            results = list(executor.map(process_email, batch))
+        
+        batch_extracted = []
+        for res in results:
+            if res:
+                total_extracted += 1
+                mode_str = _get_mode_string(res.get('category_source'))
+                logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
+                batch_extracted.append(res)
 
         if batch_extracted:
             save_to_silver(batch_extracted)
@@ -283,9 +302,8 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
         batch_start = time.time()
         batch = to_process[i:i + batch_size]
         logger.info(f"📦 Excel Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
-        batch_extracted = []
         
-        for record in batch:
+        def process_record(record):
             try:
                 operation = record.get("operation", "")
                 details = record.get("details", "")
@@ -294,25 +312,20 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
                 rec_time = record.get("time", "00:00")
                 bank_cat = record.get("bank_category_hint", "")
                 
-                # Direction from amount sign (source of truth for Excel)
                 direction = _determine_direction(f"{operation} {details}", amount=amount)
-                
-                # Smart merchant extraction from Excel fields
                 merchant = extract_merchant_from_excel(operation, details)
 
-                
-                # Build LLM text with bank category hint
                 text_parts = [f"Operation: {operation}", f"Merchant: {merchant}", f"Details: {details}"]
                 if bank_cat:
                     text_parts.append(f"Bank category hint: {bank_cat}")
                 text = "\n".join(text_parts)
                 
-                result = parser.classify_transaction(text, direction, merchant=merchant)
+                # Pass amount to allow LLM bypass if already in catalogue
+                result = parser.classify_transaction(text, direction, merchant=merchant, amount=amount)
                 
-                # Fix sign of the amount based on direction
                 final_amount = -abs(amount) if direction == "Outgoing" else abs(amount)
                 
-                row = {
+                return {
                     "original_msg_id": record["id"],
                     "tipology": direction,
                     "merchant": merchant,
@@ -325,14 +338,24 @@ def run_excel_processing(batch_size: int = 5, progress_callback=None):
                     "confidence": result.get('confidence', 0.0),
                     "reasoning": result.get('reasoning', ''),
                 }
-                batch_extracted.append(row)
-                logger.info(f"   [{direction[:3].upper()}] {final_amount}€ | {result['category']:<20} | {merchant[:20]}")
             except Exception as e:
                 logger.error(f"   Excel Parsing Error ID {record.get('id')}: {e}")
-                
+                return None
+
+        results = []
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            results = list(executor.map(process_record, batch))
+        
+        batch_extracted = []
+        for res in results:
+            if res:
+                total_extracted += 1
+                mode_str = _get_mode_string(res.get('category_source'))
+                logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
+                batch_extracted.append(res)
+
         if batch_extracted:
             save_to_silver(batch_extracted)
-            total_extracted += len(batch_extracted)
             if progress_callback:
                 progress_callback(total_extracted, total_rows)
             

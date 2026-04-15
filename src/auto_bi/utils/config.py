@@ -1,7 +1,7 @@
 import os
 
 # --- MODEL SETTINGS ---
-MODEL_ID = "gemma4-e2b-4bit"
+MODEL_ID = "gemma4-e4b-4bit"
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 # --- SEARCH SETTINGS ---

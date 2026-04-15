@@ -46,7 +46,7 @@ def get_latest_saved_date(filepath: str) -> datetime | None:
                 continue
     return latest_dt
 
-def run_ingestion():
+def run_ingestion(progress_callback=None):
     start_time = time.time()
     logger.info("="*40)
     logger.info("📥 PHASE: GMAIL INGESTION")
@@ -72,7 +72,11 @@ def run_ingestion():
 
     raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=query_addon)
     new_emails = []
-    for email in raw_emails:
+    total_raw = len(raw_emails)
+    for i, email in enumerate(raw_emails):
+        if progress_callback:
+            progress_callback(i + 1, total_raw)
+            
         if email["id"] in existing_bronze_ids:
             continue
 
@@ -99,7 +103,7 @@ def run_ingestion():
         logger.info(f"✅ No new emails found compared to local Bronze - Time taken: {elapsed:.2f}s")
 
 
-def ingest_excel(uploaded_file):
+def ingest_excel(uploaded_file, progress_callback=None):
     start_time = time.time()
     logger.info("="*40)
     logger.info("📥 PHASE: EXCEL INGESTION")
@@ -134,7 +138,11 @@ def ingest_excel(uploaded_file):
     
     existing_bronze_ids = get_already_processed_ids(BRONZE_EXCEL)
     
+    total_df = len(df)
     for idx, row in df.iterrows():
+        if progress_callback:
+            progress_callback(int(idx) + 1, total_df)
+            
         date_str = str(row["Data"]).split(" ")[0] # ensure YYYY-MM-DD formatting loosely if it's a datetime
         # More robust date handling:
         try:
