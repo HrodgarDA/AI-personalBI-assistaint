@@ -1,32 +1,19 @@
 import json
-from auto_bi.utils.models import (
-    OutgoingCategory, IncomingCategory,
-    OutgoingClassification, IncomingClassification,
-)
 
+# Placeholder template for transaction details
 EMAIL_PROMPT_TEMPLATE = "Date: {date}\nTime: {time}\nOperation: {operation}\nDetails: {details}"
 
 OUTGOING_CLASSIFICATION_PROMPT = (
-    "Analyze the bank transaction and categorize it accurately.\n"
-    "Step 1: Identify the merchant and determine its primary business.\n"
-    "Step 2: Assign the most fitting category from the list below.\n\n"
+    "You are an expert financial assistant. Analyze the bank transaction and perform TWO tasks:\n"
+    "1. MERCHANT EXTRACTION: Extract the clean name of the store or person (e.g., 'Spotify', 'Amazon', 'Zara'). Remove technical codes and dates.\n"
+    "2. CATEGORIZATION: Assign the most fitting category from the list below.\n\n"
     "CATEGORIES & GUIDELINES:\n"
-    "- Dining: Restaurants, Bars, Cafes, Fast food (KFC, McDonald's), Food delivery.\n"
-    "- Groceries: Supermarkets (Ipercoop, Conad, Lidl, Esselunga), Bakeries.\n"
-    "- Shopping: Clothing (Zara, H&M), Electronics (Amazon, MediaWorld), Online retail.\n"
-    "- Subscriptions: Digital services (Netflix, ChatGPT, Spotify, iCloud subscription), Gym memberships.\n"
-    "- Utilities: Essential services (Electricity, Gas, Water, Phone/Mobile, Internet bills).\n"
-    "- Home: Rent, Mortgage, DIY/Furniture (IKEA, Leroy Merlin), Home maintenance, cleaning products.\n"
-    "- Transport: Fuel, Public transport, Parking (EasyPark), Car repair, Train tickets.\n"
-    "- Health: Pharmacy, Medical visits, Dentist, Health insurance.\n"
-    "- Savings: Investments, Transfers to personal savings accounts.\n"
-    "- Financial: Bank fees, Taxes (F24), Debt payments, official settlements.\n"
-    "- Gifts: Donations, money sent to friends/family as presents.\n"
-    "- Other: Use only if no other category matches.\n\n"
+    "{categories_block}\n\n"
     "STRICT RULES:\n"
-    "1. KFC/McDonald's -> Dining. Zara/Amazon -> Shopping. Supermarkets -> Groceries.\n"
-    "2. If the merchant is 'PayPal', look at the other text to find the actual store.\n"
-    "3. Explain your reasoning in the 'reasoning' field before picking the category.\n"
+    "- Pick the closest match from the provided list. Do not invent new categories.\n"
+    "- If the merchant is 'PayPal', look at the text to find the actual store (e.g., 'PayPal *Zara' -> Merchant: 'Zara').\n"
+    "- Return BOTH the 'merchant' and the 'category' in the same JSON object.\n"
+    "- Use the 'reasoning' field to explain your choice.\n\n"
     "{user_feedback_examples}\n"
     "{custom_user_rules}"
 )
@@ -43,18 +30,53 @@ MERCHANT_EXTRACTION_PROMPT = (
 )
 
 INCOMING_CLASSIFICATION_PROMPT = (
-    "You are classifying a bank transaction where money ENTERED the account (Incoming).\n\n"
+    "Analyze this incoming bank transaction (money received) and perform TWO tasks:\n"
+    "1. MERCHANT/SENDER EXTRACTION: Extract the clean name of the person or entity who sent the money.\n"
+    "2. CATEGORIZATION: Assign the most fitting category from the list below.\n\n"
     "CATEGORIES:\n"
-    "- Salary: Monthly wage, pension, or career-related income.\n"
-    "- Refund: Returns from stores (Amazon refund), tax refunds, or insurance payouts.\n"
-    "- Transfer: Money received from friends, family, or other personal accounts.\n"
-    "- Gift: Birthday money, donations received.\n"
-    "- Other: Miscellaneous income.\n\n"
+    "{categories_block}\n\n"
     "KEY ITALIAN PATTERNS:\n"
-    "- 'Stipendio O Pensione' -> Salary\n"
-    "- 'Storno Pagamento' (reversal/refund) -> Refund\n"
-    "- 'Bonifico A Vostro Favore' (transfer received) -> Transfer\n\n"
-    "Return ONLY a valid JSON object with: 'category', 'amount' (POSITIVE number), 'confidence', and 'reasoning'.\n"
+    "- 'Stipendio O Pensione' -> Category: Salary/Income\n"
+    "- 'Storno Pagamento' (reversal/refund) -> Category: Refund\n"
+    "- 'Bonifico A Vostro Favore' -> Category: Transfer\n\n"
+    "Return BOTH the 'merchant' (sender) and the 'category' in the same JSON object.\n"
     "{user_feedback_examples}\n"
     "{custom_user_rules}"
+)
+
+BATCH_CLASSIFICATION_TEMPLATE = (
+    "You are a financial expert. Analyze the following list of bank transactions and categorize each one.\n\n"
+    "AVAILABLE CATEGORIES:\n"
+    "{categories_block}\n\n"
+    "TASK:\n"
+    "For each transaction in the provided list:\n"
+    "1. Extract the clean Merchant name.\n"
+    "2. Assign the best Category from the list.\n"
+    "3. Provide brief reasoning.\n\n"
+    "SYSTEM RULES:\n"
+    "- Output ONLY a JSON object with a 'results' field containing the list of result objects.\n"
+    "- Maintain the exact order of the input list.\n"
+    "{custom_user_rules}\n\n"
+    "TRANSACTIONS TO PROCESS:\n"
+    "{transactions_block}"
+)
+
+RECOVERY_CLASSIFICATION_TEMPLATE = (
+    "You are a senior financial analyst. The following transactions previously failed to be categorized. "
+    "Your goal is to perform a DEEP ANALYSIS and force a match with the existing categories. "
+    "DO NOT USE 'Uncategorized' if there is ANY reasonable match.\n\n"
+    "AVAILABLE CATEGORIES:\n"
+    "{categories_block}\n\n"
+    "TASK:\n"
+    "For each transaction in the provided list:\n"
+    "1. Extract the clean Merchant name (e.g., 'Amazon', 'Lidl').\n"
+    "2. Assign the best Category from the list.\n"
+    "3. Provide brief reasoning explaining why this is the best match despite previous failure.\n\n"
+    "STRICT USER PREFERENCES:\n"
+    "{custom_user_rules}\n\n"
+    "SYSTEM RULES:\n"
+    "- Output ONLY a JSON object with a 'results' field containing the list of result objects.\n"
+    "- Maintain the exact order of the input list.\n"
+    "FAILED TRANSACTIONS TO RE-PROCESS:\n"
+    "{transactions_block}"
 )

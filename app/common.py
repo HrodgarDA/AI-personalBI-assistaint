@@ -12,6 +12,58 @@ logger = logging.getLogger(__name__)
 DATA_PATH = Path(GOLD_FILE)
 DATE_FORMAT = "%Y-%m-%d"
 
+def restore_state_from_url():
+    """Reads st.query_params and populates st.session_state on initial load."""
+    params = st.query_params
+    
+    if "page" in params and "current_page" not in st.session_state:
+        st.session_state["current_page"] = params["page"]
+    
+    # Global toggles
+    if "adv" in params:
+        st.session_state["show_adv_global"] = params["adv"].lower() == "true"
+    if "review" in params:
+        st.session_state["needs_review"] = params["review"].lower() == "true"
+        
+    # Filters
+    if "tipology" in params:
+        st.session_state["selected_tipology"] = params["tipology"]
+    if "cats" in params:
+        # st.query_params.get_all returns a list of values for the same key
+        st.session_state["cat_ms"] = params.get_all("cats")
+    if "start" in params:
+        st.session_state["selected_start_date"] = params["start"]
+    if "end" in params:
+        st.session_state["selected_end_date"] = params["end"]
+
+def sync_url_from_state():
+    """Writes relevant session_state variables to st.query_params."""
+    updates = {}
+    
+    if "current_page" in st.session_state:
+        updates["page"] = st.session_state["current_page"]
+        
+    if "show_adv_global" in st.session_state:
+        updates["adv"] = str(st.session_state["show_adv_global"]).lower()
+    if "needs_review" in st.session_state:
+        updates["review"] = str(st.session_state["needs_review"]).lower()
+        
+    if "cat_ms" in st.session_state:
+        updates["cats"] = st.session_state["cat_ms"]
+        
+    if "selected_tipology" in st.session_state:
+        updates["tipology"] = st.session_state["selected_tipology"]
+        
+    # Specific date handling if they are objects (from slider/picker)
+    if "selected_start_date" in st.session_state:
+        val = st.session_state["selected_start_date"]
+        updates["start"] = val.isoformat() if hasattr(val, "isoformat") else str(val)
+    if "selected_end_date" in st.session_state:
+        val = st.session_state["selected_end_date"]
+        updates["end"] = val.isoformat() if hasattr(val, "isoformat") else str(val)
+        
+    st.query_params.from_dict(updates)
+
 def apply_theme():
     css = """
     <style>
@@ -22,13 +74,14 @@ def apply_theme():
         [data-testid="stMetric"] { display: flex; flex-direction: column; align-items: center; text-align: center; }
         [data-testid="stMetricLabel"] > div { justify-content: center !important; }
         [data-testid="stMetricValue"] > div { justify-content: center !important; }
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { text-align: center !important; width: 100%; display: block; }
         div[data-testid="stVerticalBlockBorderWrapper"] { border-color: #374151 !important; border-radius: 12px; background-color: #1F2937 !important; }
         
         /* Aggressive styling for all Sidebar Buttons */
         [data-testid="stSidebar"] button[data-testid^="stBaseButton"] {
             display: flex !important;
-            justify-content: flex-start !important;
-            text-align: left !important;
+            justify-content: center !important;
+            text-align: center !important;
             width: 100% !important;
             background-color: #111827 !important; /* Page Background Color */
             color: white !important;
@@ -45,9 +98,9 @@ def apply_theme():
 
         /* Target the internal text container for alignment */
         [data-testid="stSidebar"] button[data-testid^="stBaseButton"] * {
-            text-align: left !important;
+            text-align: center !important;
             color: white !important;
-            justify-content: flex-start !important;
+            justify-content: center !important;
         }
 
         [data-testid="stSidebar"] button[data-testid^="stBaseButton"] p {
@@ -89,6 +142,7 @@ def parse_date(value: str):
     except (TypeError, ValueError):
         return None
 
+@st.cache_data
 def load_data(path: Path = DATA_PATH):
     if not path.exists():
         return []
@@ -96,7 +150,13 @@ def load_data(path: Path = DATA_PATH):
         reader = csv.DictReader(fp)
         rows = list(reader)
 
+    EXPECTED_FIELDS = ["reasoning", "original_operation", "original_details", "category", "merchant", "amount", "tipology", "date"]
     for row in rows:
+        # Ensure all UI-critical fields exist to prevent st.data_editor column hiding
+        for field in EXPECTED_FIELDS:
+            if field not in row:
+                row[field] = ""
+                
         if "amount" in row:
             try:
                 row["amount"] = float(row["amount"])

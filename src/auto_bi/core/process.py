@@ -2,38 +2,28 @@ import os
 import json
 import logging
 import csv
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from auto_bi.core.extractor import TransactionParser
-from auto_bi.utils.prompts import EMAIL_PROMPT_TEMPLATE
 from auto_bi.core.ingestion import get_already_processed_ids
-from auto_bi.utils.config import BRONZE_FILE, BRONZE_EXCEL, SILVER_FILE, GOLD_FILE
+from auto_bi.utils.config import BRONZE_RAW, SILVER_FILE, GOLD_FILE
 from auto_bi.utils.utils import extract_merchant_from_excel
 from auto_bi.utils.bank_profile import load_bank_profile
 
 logger = logging.getLogger(__name__)
 
 
-
-def _extract_merchant_from_excel_legacy(operation: str, details: str) -> str:
-    """DEPRECATED: Use src.utils.extract_merchant_from_excel instead."""
-    return extract_merchant_from_excel(operation, details)
-
-
-
 def _determine_direction(text: str, amount: float = None) -> str:
     """
-    Pre-classify transaction direction from Italian banking keywords or amount sign.
-    For Excel: amount sign is the source of truth.
-    For Email: keyword matching on subject/body.
+    Classify transaction direction from amount sign.
+    Keywords are technically secondary for Tabular data.
     """
     if amount is not None:
         return "Incoming" if amount >= 0 else "Outgoing"
     
+    # Fallback to keywords if amount is missing
     text_lower = text.lower()
     profile = load_bank_profile()
-    
     for pattern in profile.incoming_keywords:
         if pattern.lower() in text_lower:
             return "Incoming"
@@ -41,49 +31,36 @@ def _determine_direction(text: str, amount: float = None) -> str:
 
 
 def _get_mode_string(source: str) -> str:
-    """Map category source to a user-friendly mode string with emoji."""
+    """Map category source to a standardized log prefix."""
     mapping = {
-        "from_catalogue": "⚡ BYPASS MODEL",
-        "web_search": "🔍 WEB SEARCH",
-        "llm_inference": "🧠 LLM MODEL"
+        "fast_path_mapping": "[BYPASS]",
+        "from_catalogue":    "[BYPASS]",
+        "web_search":        "[ WEB  ]",
+        "llm_inference":     "[  IA  ]"
     }
-    return mapping.get(source, "🧠 LLM MODEL")
+    return mapping.get(source, "[  IA  ]")
 
 
-def _print_recap(total_time: float, phases: list, records: list, failed_count: int = 0):
-    """
-    Prints a detailed recap report of the processing run.
-    - phases: list of tuples (Phase Name, duration)
-    - records: list of dictionaries with {id, merchant, duration, mode}
-    - failed_count: number of records that crashed or timed out
-    """
+def _print_recap(total_time: float, records: list, failed_count: int = 0):
+    """Prints a detailed recap report of the processing run."""
     logger.info("\n" + "═"*50)
     logger.info("📊 PROCESSING RECAP REPORT")
     logger.info("═"*50)
     
-    # 1. Phases
-    logger.info("\n📋 PHASES EXECUTED:")
-    for name, duration in phases:
-        logger.info(f"   - {name:<25} | {duration:>6.2f}s")
-    
-    # 2. General Stats
     total_records = len(records)
     avg_time = (sum(r['duration'] for r in records) / total_records) if total_records > 0 else 0
     
     logger.info("\n📈 GENERAL STATISTICS:")
-    logger.info(f"   - Total Processed:          {total_records + failed_count}")
-    logger.info(f"   - Successfully Extracted:   {total_records}")
+    logger.info(f"   - Total Successfully Processed: {total_records}")
     if failed_count > 0:
-        logger.info(f"   - Failed/Timed Out:         {failed_count} ⚠️")
-    logger.info(f"   - Total Execution Time:     {total_time:.2f}s")
+        logger.info(f"   - Failed/Timed Out:             {failed_count} ⚠️")
+    logger.info(f"   - Total Execution Time:         {total_time:.2f}s")
     if total_records > 0:
-        logger.info(f"   - Average Speed:            {avg_time:.2f}s / record")
+        logger.info(f"   - Average Speed:                {avg_time:.2f}s / record")
     
-    # 3. Slowest Record (Bottleneck)
     if records:
         slowest = max(records, key=lambda x: x['duration'])
         logger.info("\n🐢 SLOWEST TRANSACTION (Bottleneck):")
-        logger.info(f"   - ID:           {slowest['id']}")
         logger.info(f"   - Merchant:     {slowest['merchant']}")
         logger.info(f"   - Mode:         {slowest['mode']}")
         logger.info(f"   - Time:         {slowest['duration']:.2f}s")
@@ -92,40 +69,56 @@ def _print_recap(total_time: float, phases: list, records: list, failed_count: i
 
 
 def _check_llm_health() -> bool:
-    """Check if Ollama server is reachable and model is loaded."""
+    """Check if Ollama server is reachable."""
     from auto_bi.utils.config import OLLAMA_BASE_URL
     import requests
     try:
-        # Check base connectivity
         response = requests.get(OLLAMA_BASE_URL.replace("/v1", "/api/tags"), timeout=5)
-        if response.status_code == 200:
-            return True
+        return response.status_code == 200
     except Exception:
-        pass
-    return False
+        return False
 
 
-def save_to_silver(new_records):
-    data = []
-    if os.path.exists(SILVER_FILE):
-        with open(SILVER_FILE, 'r', encoding='utf-8') as f:
-            try: data = json.load(f)
-            except: data = []
+def save_to_silver(new_records, current_state=None):
+    """
+    Appends new records to the silver JSON file.
+    If current_state is provided, it uses it instead of re-reading from disk.
+    """
+    if current_state is not None:
+        data = current_state
+    else:
+        data = []
+        if os.path.exists(SILVER_FILE):
+            with open(SILVER_FILE, 'r', encoding='utf-8') as f:
+                try: 
+                    data = json.load(f)
+                except Exception: 
+                    data = []
     
-    # Supporto sia per oggetti Pydantic che per dizionari
-    data.extend([r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records])
+    # Handle both Pydantic models and dictionaries
+    new_data = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
+    data.extend(new_data)
     
-    with open(SILVER_FILE, 'w', encoding='utf-8') as f:
+    os.makedirs(os.path.dirname(SILVER_FILE), exist_ok=True)
+    
+    # Atomic write-then-rename to prevent corruption
+    temp_file = SILVER_FILE + ".tmp"
+    with open(temp_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+    os.replace(temp_file, SILVER_FILE)
+    
+    return data
 
 
 def run_certify():
+    """Converts Silver JSON to Gold CSV with normalization."""
     start_time = time.time()
     logger.info("="*40)
-    logger.info("🏅 PHASE: CERTIFY SILVER -> GOLD CSV")
+    logger.info("🏅 PHASE: DATA CERTIFICATION")
     logger.info("="*40)
+    
     if not os.path.exists(SILVER_FILE):
-        logger.error("Silver file missing. Run --process first.")
+        logger.error("Silver file missing. Run processing first.")
         return
 
     with open(SILVER_FILE, 'r', encoding='utf-8') as f:
@@ -136,321 +129,212 @@ def run_certify():
             return
 
     if not records:
-        elapsed = time.time() - start_time
-        logger.info(f"✅ No records in Silver table. No CSV generated. - Time taken: {elapsed:.2f}s")
+        logger.info(f"✅ No records to certify. - Time taken: {time.time() - start_time:.2f}s")
         return
 
-    # Migration/Normalization: ensure source, time, and new tipology values
-    OLD_TO_NEW_TIPOLOGY = {
-        "Expense": "Outgoing", "expense": "Outgoing",
-        "Refund": "Outgoing",  # Old refund was outgoing-negative; now we use amount sign
-        "Salary": "Incoming",
-    }
+    # Normalization & Cleaning
     for r in records:
-        if "source" not in r:
-            r["source"] = "excel" if len(str(r.get("original_msg_id", ""))) == 32 else "email"
         if "time" not in r or not r["time"]:
             r["time"] = "00:00"
-        # Migrate old tipology values
-        old_tip = r.get("tipology", "")
-        if old_tip in OLD_TO_NEW_TIPOLOGY:
-            r["tipology"] = OLD_TO_NEW_TIPOLOGY[old_tip]
-        # Migrate old category "Refunds" -> "Refund"
+        
+        # Migrate/Fix typography/direction labels
+        tip = r.get("tipology", "").lower()
+        if tip in ["expense", "refund"]:
+            r["tipology"] = "Outgoing"
+        elif tip == "salary":
+            r["tipology"] = "Incoming"
+            
         if r.get("category") == "Refunds":
             r["category"] = "Refund"
 
-    # Identify "Excel Coverage": Dates that have at least one Excel record
-    excel_dates = {r["date"] for r in records if r["source"] == "excel"}
-    
-    final_records = []
-    
-    # Group by Date to handle culling
-    from collections import defaultdict
-    date_groups = defaultdict(list)
-    for r in records:
-        date_groups[r["date"]].append(r)
-        
-    for dt, group in date_groups.items():
-        if dt not in excel_dates:
-            # Case A: No Excel for this date. Keep all email records.
-            final_records.extend(group)
-        else:
-            # Case B: Excel exists for this date. EXCEL COMMANDS.
-            excel_rows = [r for r in group if r["source"] == "excel"]
-            email_rows = [r for r in group if r["source"] == "email"]
-            
-            # Sort emails by time to pair them predictably
-            email_rows.sort(key=lambda x: x.get("time", "00:00"))
-            
-            # Group by amount and merchant to match specific identical transactions
-            excel_subgroups = defaultdict(list)
-            for r in excel_rows:
-                key = (r["amount"], r["merchant"].lower()[:5])
-                excel_subgroups[key].append(r)
-                
-            email_subgroups = defaultdict(list)
-            for r in email_rows:
-                key = (r["amount"], r["merchant"].lower()[:5])
-                email_subgroups[key].append(r)
-                
-            # For each Excel record, try to take a time from a matching email
-            for (amt, merch_prefix), sub_excel in excel_subgroups.items():
-                sub_email = email_subgroups.get((amt, merch_prefix), [])
-                
-                for ex_rec in sub_excel:
-                    if sub_email:
-                        matching_mail = sub_email.pop(0)
-                        ex_rec["time"] = matching_mail["time"]
-                    final_records.append(ex_rec)
-            
-            # Note: Any leftover email_rows are DISCARDED (Culling)
-            
-    records = final_records
     records.sort(key=lambda x: (x.get("date", ""), x.get("time", "")))
 
-    os.makedirs("data", exist_ok=True)
+    # Export to CSV
     fieldnames = sorted({key for record in records for key in record.keys()})
-
     with open(GOLD_FILE, 'w', newline='', encoding='utf-8') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         for record in records:
             writer.writerow({k: record.get(k, "") for k in fieldnames})
 
-    elapsed = time.time() - start_time
-    logger.info(f"✅ CSV Generated: {GOLD_FILE} ({len(records)} rows) - Time taken: {elapsed:.2f}s")
+    logger.info(f"✅ CSV Generated: {GOLD_FILE} ({len(records)} rows) - Time taken: {time.time() - start_time:.2f}s")
 
 
 def run_processing(batch_size: int = 5, progress_callback=None):
+    """Main LLM processing loop for Bronze data. Optimized with grouping and buffering."""
     start_time = time.time()
     logger.info("="*40)
-    logger.info("🧠 PHASE: LLM PROCESSING (EMAILS)")
+    logger.info("🧠 PHASE: AI CATEGORIZATION (OPTIMIZED)")
     logger.info("="*40)
     
-    if not os.path.exists(BRONZE_FILE):
-        logger.error("Bronze file missing. Run --ingest first.")
+    if not os.path.exists(BRONZE_RAW):
+        logger.info(f"No raw data found at {BRONZE_RAW}. Upload data first.")
         return
 
+    # 1. Load context once
     all_raw = []
-    with open(BRONZE_FILE, "r", encoding="utf-8") as f:
+    with open(BRONZE_RAW, "r", encoding="utf-8") as f:
         for line in f:
-            try: all_raw.append(json.loads(line))
-            except: continue
+            try: 
+                all_raw.append(json.loads(line))
+            except Exception: 
+                continue
+            
+    # Load silver state once to avoid repeated disk hits
+    silver_state = []
+    if os.path.exists(SILVER_FILE):
+        with open(SILVER_FILE, 'r', encoding='utf-8') as f:
+            try: silver_state = json.load(f)
+            except Exception: silver_state = []
+            
+    processed_silver_ids = {str(r.get("id")) for r in silver_state}
+    to_process = [m for m in all_raw if str(m["id"]) not in processed_silver_ids]
     
-    processed_silver_ids = get_already_processed_ids(SILVER_FILE, id_key="original_msg_id")
-    to_process = [m for m in all_raw if m["id"] not in processed_silver_ids]
-
     if not to_process:
-        elapsed = time.time() - start_time
-        logger.info(f"✅ Silver Layer already synced. Nothing to process. - Time taken: {elapsed:.2f}s")
+        logger.info(f"✅ Silver Layer already synced. Nothing to process. - Time taken: {time.time() - start_time:.2f}s")
         return
-
-    logger.info(f"Starting to parse {len(to_process)} emails.")
-    # Initial Health Check
+        
+    logger.info(f"Starting to process {len(to_process)} transactions.")
     if not _check_llm_health():
         logger.error("❌ CRITICAL: Ollama server is unreachable. Ensure Ollama is running.")
         return
 
     parser = TransactionParser()
-    total_extracted = 0
-    total_failed = 0
-    total_emails = len(to_process)
-    all_processed_stats = []
-
-    for i in range(0, len(to_process), batch_size):
-        batch_start = time.time()
-        batch = to_process[i:i + batch_size]
-        logger.info(f"📦 Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
-        
-        def process_email(email):
-            t0 = time.time()
-            try:
-                text = EMAIL_PROMPT_TEMPLATE.format(
-                    date=email.get('date', ''),
-                    time=email.get('time', ''),
-                    operation=email.get('operation', ''),
-                    details=email.get('details', ''),
-                )
-                canonical_date = email.get('date', '')
-                direction = _determine_direction(
-                    email.get('operation', '') + ' ' + email.get('details', '')
-                )
-
-                # Unified classification
-                result = parser.classify_transaction(text, direction)
-
-                return {
-                    "original_msg_id": email['id'],
-                    "tipology": direction,
-                    "merchant": result.get('merchant', 'Unknown'),
-                    "category": result['category'],
-                    "amount": result.get('amount') or 0.0,
-                    "date": canonical_date,
-                    "time": email.get('time', '00:00'),
-                    "source": "email",
-                    "category_source": result.get('category_source', 'llm_inference'),
-                    "confidence": result.get('confidence', 0.0),
-                    "reasoning": result.get('reasoning', ''),
-                    "duration": time.time() - t0,
-                }
-            except Exception as e:
-                logger.error(f"   Parsing Error ID {email['id']}: {e}")
-                return None
-
-        results = []
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            results = list(executor.map(process_email, batch))
-        
-        batch_extracted = []
-        for res in results:
-            if res:
-                total_extracted += 1
-                mode_str = _get_mode_string(res.get('category_source'))
-                logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
-                batch_extracted.append(res)
-                # Track for recap
-                all_processed_stats.append({
-                    "id": res.get("original_msg_id"),
-                    "merchant": res.get("merchant"),
-                    "duration": res.get("duration", 0),
-                    "mode": mode_str
-                })
-            else:
-                total_failed += 1
-
-        if batch_extracted:
-            save_to_silver(batch_extracted)
-            if progress_callback:
-                progress_callback(total_extracted, total_emails)
-            
-        batch_elapsed = time.time() - batch_start
-        logger.info(f"   Batch completed - {len(batch_extracted)} extractions - {batch_elapsed:.2f}s")
-
-    elapsed = time.time() - start_time
-    # Use the new recap report
-    _print_recap(
-        total_time=elapsed,
-        phases=[("Email Processing", elapsed)],
-        records=all_processed_stats,
-        failed_count=total_failed
-    )
-
-def run_excel_processing(batch_size: int = 5, progress_callback=None):
-    start_time = time.time()
-    logger.info("="*40)
-    logger.info("🧠 PHASE: LLM PROCESSING (EXCEL)")
-    logger.info("="*40)
-    
-    if not os.path.exists(BRONZE_EXCEL):
-        logger.info("Nessun file data/bronze_raw_excel.jsonl trovato. Niente da processare o caricamento mancante.")
-        return
-
-    all_raw = []
-    with open(BRONZE_EXCEL, "r", encoding="utf-8") as f:
-        for line in f:
-            try: all_raw.append(json.loads(line))
-            except: continue
-            
-    processed_silver_ids = get_already_processed_ids(SILVER_FILE, id_key="original_msg_id")
-    to_process = [m for m in all_raw if m["id"] not in processed_silver_ids]
-    
-    if not to_process:
-        elapsed = time.time() - start_time
-        logger.info(f"✅ Excel Silver Layer already synced. Nothing to process. - Time taken: {elapsed:.2f}s")
-        return
-        
-    logger.info(f"Starting to parse {len(to_process)} excel occurrences.")
-    # Initial Health Check
-    if not _check_llm_health():
-        logger.error("❌ CRITICAL: Ollama server is unreachable. Ensure Ollama is running.")
-        return
-
-    parser = TransactionParser()
-    total_extracted = 0
-    total_failed = 0
     total_rows = len(to_process)
+    total_processed_instances = 0
+    total_failed = 0
     all_processed_stats = []
-    
-    for i in range(0, len(to_process), batch_size):
+
+    # 2. Semantic Grouping (Grouping identical transactions)
+    groups = {}
+    for record in to_process:
+        sig = (
+            record.get("operation", "").strip(),
+            record.get("details", "").strip(),
+            record.get("bank_category_hint", "").strip(),
+            float(record.get("amount", 0.0))
+        )
+        if sig not in groups:
+            groups[sig] = []
+        groups[sig].append(record)
+
+    unique_signatures = list(groups.keys())
+    logger.info(f"💎 Found {len(unique_signatures)} unique transaction signatures among {total_rows} records.")
+
+    # 3. Processing unique signatures in blocks
+    process_batch_size = 10 # Process 10 unique signatures at a time
+    for i in range(0, len(unique_signatures), process_batch_size):
         batch_start = time.time()
-        batch = to_process[i:i + batch_size]
-        logger.info(f"📦 Excel Batch {(i // batch_size) + 1} / {(len(to_process) // batch_size) + 1}")
+        sig_batch = unique_signatures[i:i + process_batch_size]
+        logger.info(f"📦 Unique Block {(i // process_batch_size) + 1} / {(len(unique_signatures) // process_batch_size) + 1}")
         
-        def process_record(record):
-            t0 = time.time()
-            try:
-                operation = record.get("operation", "")
-                details = record.get("details", "")
-                amount = float(record.get("amount", 0.0))
-                rec_date = record.get("date", "")
-                rec_time = record.get("time", "00:00")
-                bank_cat = record.get("bank_category_hint", "")
-                
-                direction = _determine_direction(f"{operation} {details}", amount=amount)
-                merchant = extract_merchant_from_excel(operation, details)
-
-                text_parts = [f"Operation: {operation}", f"Merchant: {merchant}", f"Details: {details}"]
-                if bank_cat:
-                    text_parts.append(f"Bank category hint: {bank_cat}")
-                text = "\n".join(text_parts)
-                
-                # Pass amount to allow LLM bypass if already in catalogue
-                result = parser.classify_transaction(text, direction, merchant=merchant, amount=amount)
-                
-                final_amount = -abs(amount) if direction == "Outgoing" else abs(amount)
-                
-                return {
-                    "original_msg_id": record["id"],
-                    "tipology": direction,
-                    "merchant": merchant,
-                    "category": result['category'],
-                    "amount": final_amount,
-                    "date": rec_date,
-                    "time": rec_time,
-                    "source": "excel",
-                    "category_source": result.get('category_source', 'llm_inference'),
-                    "confidence": result.get('confidence', 0.0),
-                    "reasoning": result.get('reasoning', ''),
-                    "duration": time.time() - t0,
-                }
-            except Exception as e:
-                logger.error(f"   Excel Parsing Error ID {record.get('id')}: {e}")
-                return None
-
-        results = []
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            results = list(executor.map(process_record, batch))
+        tx_to_classify = [] # Inputs for classify_batch
+        results_map = {} # Results for each signature
         
-        batch_extracted = []
-        for res in results:
-            if res:
-                total_extracted += 1
-                mode_str = _get_mode_string(res.get('category_source'))
-                logger.info(f"Processing transaction {total_extracted} ({res['merchant']}, {res['amount']}€, {res['date']}) Selected Mode: {mode_str}")
-                batch_extracted.append(res)
-                # Track for recap
-                all_processed_stats.append({
-                    "id": res.get("original_msg_id"),
-                    "merchant": res.get("merchant"),
-                    "duration": res.get("duration", 0),
-                    "mode": mode_str
-                })
-            else:
-                total_failed += 1
-
-        if batch_extracted:
-            save_to_silver(batch_extracted)
-            if progress_callback:
-                progress_callback(total_extracted, total_rows)
+        # Prepare the block
+        for sig in sig_batch:
+            record = groups[sig][0]
+            operation, details, bank_cat, amount = sig
+            direction = _determine_direction(f"{operation} {details}", amount=amount)
             
-        batch_elapsed = time.time() - batch_start
-        logger.info(f"   Batch completed - {len(batch_extracted)} extractions - {batch_elapsed:.2f}s")
+            # Fast Path Mapping
+            mapped_cat = None
+            if bank_cat:
+                mapping = getattr(parser.profile, 'category_mapping', {})
+                lookup = {k.lower().strip(): v for k, v in mapping.items()}
+                mapped_cat = lookup.get(bank_cat.lower().strip())
+            
+            if mapped_cat:
+                results_map[sig] = {
+                    "category": mapped_cat,
+                    "merchant": "Mapped", # Will be refined later
+                    "confidence": 1.0,
+                    "category_source": "fast_path_mapping",
+                    "reasoning": f"Mapped via bank profile.",
+                    "duration": 0.01
+                }
+            else:
+                # Add to LLM batch
+                custom_p = getattr(parser.profile, 'cleaning_patterns', [])
+                aliases = getattr(parser.profile, 'merchant_aliases', {})
+                merchant = extract_merchant_from_excel(operation, details, custom_patterns=custom_p, aliases=aliases)
+                
+                text = f"Operation: {operation}\nDetails: {details}"
+                if bank_cat: text += f"\nBank category: {bank_cat}"
+                
+                tx_to_classify.append({
+                    "sig": sig,
+                    "text": text,
+                    "direction": direction,
+                    "merchant": merchant,
+                    "amount": amount
+                })
 
-    elapsed = time.time() - start_time
-    # Use the new recap report
-    _print_recap(
-        total_time=elapsed,
-        phases=[("Excel Processing", elapsed)],
-        records=all_processed_stats,
-        failed_count=total_failed
-    )
+        # Process Batch
+        if tx_to_classify:
+            t0 = time.time()
+            logger.info(f"   ⚙️ Preparing batch for LLM...")
+            batch_results = parser.classify_batch([{"text": x['text'], "direction": x['direction'], "merchant": x['merchant'], "amount": x['amount']} for x in tx_to_classify])
+            duration_per_tx = (time.time() - t0) / len(tx_to_classify)
+            
+            for idx, res in enumerate(batch_results):
+                sig = tx_to_classify[idx]['sig']
+                res['duration'] = duration_per_tx 
+                results_map[sig] = res
+            logger.info(f"   ✨ Batch processed in {time.time() - t0:.2f}s")
+
+        # Distribute Results to All Instances
+        new_silver_entries = []
+        for sig in sig_batch:
+            res = results_map.get(sig)
+            if not res: 
+                total_failed += 1
+                continue
+            
+            instances = groups[sig]
+            mode_prefix = _get_mode_string(res.get('category_source'))
+            logger.info(f"   {mode_prefix} {res['merchant']:<20} | {res['category']:<20} (x{len(instances)}) [{res['duration']:.2f}s/avg]")
+            
+            operation, details, bank_cat, amount = sig
+            direction = _determine_direction(f"{operation} {details}", amount=amount)
+            final_amount = -abs(amount) if direction == "Outgoing" else abs(amount)
+
+            for inst in instances:
+                entry = {
+                    "id": inst["id"],
+                    "date": inst.get("date", ""),
+                    "time": inst.get("time", "00:00"),
+                    "tipology": direction,
+                    "merchant": res['merchant'],
+                    "category": res['category'],
+                    "amount": final_amount,
+                    "original_operation": operation,
+                    "original_details": details,
+                    "source": "tabular",
+                    "category_source": res.get('category_source', 'llm_inference'),
+                    "confidence": res.get('confidence', 0.0),
+                    "reasoning": res.get('reasoning', ''),
+                }
+                new_silver_entries.append(entry)
+                total_processed_instances += 1
+                
+                all_processed_stats.append({
+                    "id": inst.get("id"),
+                    "merchant": res.get("merchant"),
+                    "duration": res['duration'],
+                    "mode": mode_prefix
+                })
+
+        if new_silver_entries:
+            silver_state = save_to_silver(new_silver_entries, current_state=silver_state)
+            parser.save_caches()
+            if progress_callback:
+                progress_callback(total_processed_instances, total_rows)
+            
+        logger.info(f"   Block completed in {time.time() - batch_start:.2f}s")
+            
+    _print_recap(total_time=time.time() - start_time, records=all_processed_stats, failed_count=total_failed)
+
+
+# --- Backward Compatibility Aliases ---
+run_excel_processing = run_processing

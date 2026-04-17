@@ -30,52 +30,85 @@ LINKING_PREPOSITIONS = {"da", "di", "del", "della", "degli", "dalle", "presso", 
 
 # --- MERCHANT CLEANING ---
 
-def clean_merchant_name(name: str) -> str:
-    """Clean a merchant name, removing trailing dates and noise."""
+def clean_merchant_name(name: str, custom_patterns: list = None, aliases: dict = None) -> str:
+    """Clean a merchant name, with manual overrides having the highest priority."""
     if not name: return "Unknown"
+    
+    # 0. Apply manual aliases (case-insensitive lookup) - Highest Priority
+    # We check the raw input first
     clean = name.strip()
-    # Remove trailing date patterns like "08/041312" or "VIA 28/"
+    if aliases:
+        lookup = {k.lower().strip(): v for k, v in aliases.items()}
+        if clean.lower() in lookup:
+            return lookup[clean.lower()]
+
+    # 1. Apply custom patterns if provided
+    if custom_patterns:
+        for pattern in custom_patterns:
+            try:
+                clean = re.sub(pattern, '', clean, flags=re.IGNORECASE)
+            except Exception as e:
+                logger.warning(f"Invalid custom regex '{pattern}': {e}")
+                
+    # 2. Remove trailing date patterns like "08/041312" or "VIA 28/"
     clean = re.sub(r'\s+\d{2}/\d{2,}.*$', '', clean)
-    # Remove trailing numbers
+    # 3. Remove trailing numbers
     clean = re.sub(r'\s+\d+$', '', clean)
-    return clean.strip()[:50] if clean else "Unknown"
+    
+    clean = clean.strip()
+    
+    # Check aliases again after cleaning (in case the alias matches the cleaned version)
+    if aliases:
+        lookup = {k.lower().strip(): v for k, v in aliases.items()}
+        if clean.lower() in lookup:
+            return lookup[clean.lower()]
+
+    return clean[:50] if clean else "Unknown"
 
 
-def clean_merchant_from_details(details: str) -> str:
+def clean_merchant_from_details(details: str, custom_patterns: list = None, aliases: dict = None) -> str:
     """Extract merchant name from dirty details field (Excel format)."""
     if not details or details.strip().upper() == "N.D":
         return "Unknown"
     
     text = details.strip()
     
-    # Pattern: "Pagamento Su POS MERCHANT_NAME DD/MMHHMM Carta..."
+    # 0. Apply custom patterns if provided
+    if custom_patterns:
+        for pattern in custom_patterns:
+            try:
+                text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+            except Exception as e:
+                logger.warning(f"Invalid custom regex '{pattern}': {e}")
+
+    # 1. Pattern: "Pagamento Su POS MERCHANT_NAME DD/MMHHMM Carta..."
     pos_match = re.match(r'(?:Pagamento\s+Su\s+POS\s+)(.+?)\s+\d{2}/\d{2}', text, re.IGNORECASE)
     if pos_match:
-        return pos_match.group(1).strip()[:50]
+        return clean_merchant_name(pos_match.group(1), aliases=aliases)
     
-    # Pattern: "MERCHANT_NAME DD/MMHHMM Carta N.XXXX..."
+    # 2. Pattern: "MERCHANT_NAME DD/MMHHMM Carta N.XXXX..."
     card_match = re.match(r'(.+?)\s+\d{2}/\d{2}\d{4}\s+Carta', text, re.IGNORECASE)
     if card_match:
-        return card_match.group(1).strip()[:50]
+        return clean_merchant_name(card_match.group(1), aliases=aliases)
     
-    # Pattern: "EFFETTUATO IL DD/MM/YYYY ... PRESSO MERCHANT_NAME"
+    # 3. Pattern: "EFFETTUATO IL DD/MM/YYYY ... PRESSO MERCHANT_NAME"
     presso_match = re.search(r'PRESSO\s+(.+?)$', text, re.IGNORECASE)
     if presso_match:
-        return presso_match.group(1).strip()[:50]
+        return clean_merchant_name(presso_match.group(1), aliases=aliases)
     
-    # Pattern: "Effettuato Il DD/MM/YYYY ... Presso Merchant Name"
+    # 4. Pattern: "Effettuato Il DD/MM/YYYY ... Presso Merchant Name"
     presso_match2 = re.search(r'Presso\s+(.+?)$', text, re.IGNORECASE)
     if presso_match2:
-        return presso_match2.group(1).strip()[:50]
+        return clean_merchant_name(presso_match2.group(1), aliases=aliases)
     
     # Fallback: first 50 chars cleaned of codes
     fallback = re.sub(r'COD\.?\s*(?:DISP\.?)?\s*\d+[/\s]*\w*', '', text)
     fallback = re.sub(r'\b\d{10,}\b', '', fallback)
     fallback = re.sub(r'\s+', ' ', fallback).strip()
-    return fallback[:50] if fallback else "Unknown"
+    return clean_merchant_name(fallback, aliases=aliases)
 
 
-def extract_merchant_from_excel(operation: str, details: str) -> str:
+def extract_merchant_from_excel(operation: str, details: str, custom_patterns: list = None, aliases: dict = None) -> str:
     """Main strategy to extract merchant from Excel fields."""
     op_lower = operation.strip().lower()
     
@@ -87,13 +120,13 @@ def extract_merchant_from_excel(operation: str, details: str) -> str:
         for pattern in [r'(?:Disposto Da|A Favore Di)\s+(.+)', ]:
             match = re.search(pattern, operation, re.IGNORECASE)
             if match:
-                return match.group(1).strip()[:50]
-        return operation[:50]
+                return clean_merchant_name(match.group(1), aliases=aliases)
+        return clean_merchant_name(operation, aliases=aliases)
     
     if not is_generic:
-        return clean_merchant_name(operation)
+        return clean_merchant_name(operation, custom_patterns=custom_patterns, aliases=aliases)
     
-    return clean_merchant_from_details(details)
+    return clean_merchant_from_details(details, custom_patterns=custom_patterns, aliases=aliases)
 
 
 # --- SEARCH QUERY UTILS ---

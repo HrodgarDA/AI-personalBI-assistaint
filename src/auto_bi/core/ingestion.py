@@ -2,115 +2,47 @@ import os
 import json
 import logging
 import time
-from datetime import datetime
 import pandas as pd
-from auto_bi.utils.gmail_client import GmailScraper
-from auto_bi.utils.config import BRONZE_FILE, BRONZE_EXCEL
+import hashlib
+from datetime import datetime
+from auto_bi.utils.config import BRONZE_RAW
 from auto_bi.utils.bank_profile import load_bank_profile
 
 logger = logging.getLogger(__name__)
 
 
 def get_already_processed_ids(filepath: str, id_key: str = "id") -> set:
+    """Helper to get IDs that are already present in a JSONL or JSON file."""
     if not os.path.exists(filepath): return set()
     found_ids = set()
     with open(filepath, "r", encoding="utf-8") as f:
         if filepath.endswith(".jsonl"):
             for line in f:
-                try: found_ids.add(json.loads(line)[id_key])
-                except: continue
+                try: 
+                    found_ids.add(json.loads(line)[id_key])
+                except Exception: 
+                    continue
         else:
             try:
                 data = json.load(f)
                 for item in data:
-                    if "original_msg_id" in item:
-                        found_ids.add(item["original_msg_id"])
-            except: pass
+                    # Compatibility with silver (which might use original_msg_id) or generic id
+                    val = item.get("id", item.get("original_msg_id"))
+                    if val:
+                        found_ids.add(val)
+            except Exception: 
+                pass
     return found_ids
 
-def get_latest_saved_date(filepath: str) -> datetime | None:
-    if not os.path.exists(filepath):
-        return None
 
-    latest_dt = None
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                item = json.loads(line)
-                date_val = item.get("date", item.get("email_date"))
-                if not date_val:
-                    continue
-                current_dt = datetime.strptime(date_val, "%Y-%m-%d")
-                if latest_dt is None or current_dt > latest_dt:
-                    latest_dt = current_dt
-            except Exception:
-                continue
-    return latest_dt
-
-def run_ingestion(progress_callback=None):
+def ingest_tabular_data(uploaded_file, progress_callback=None):
+    """
+    Ingests tabular data (Excel/CSV) into the Bronze layer.
+    Renamed from ingest_excel to reflect broader support.
+    """
     start_time = time.time()
     logger.info("="*40)
-    logger.info("📥 PHASE: GMAIL INGESTION")
-    logger.info("="*40)
-    os.makedirs("data", exist_ok=True)
-    
-    force_full = os.getenv("FORCE_FULL_LOAD", "false").lower() == "true"
-    max_limit = int(os.getenv("MAX_EMAILS", "1000000")) if force_full else int(os.getenv("MAX_EMAILS", "50"))
-    last_saved_dt = None if force_full else get_latest_saved_date(BRONZE_FILE)
-
-    if force_full:
-        logger.info("FORCE_FULL_LOAD=true: downloading all available emails.")
-        query_addon = ""
-    elif last_saved_dt:
-        logger.info(f"Incremental logic: fetching emails after {last_saved_dt.isoformat()}")
-        query_addon = f"after:{last_saved_dt.strftime('%Y/%m/%d')}"
-    else:
-        logger.info("No Bronze file found: downloading all available emails.")
-        query_addon = ""
-
-    profile = load_bank_profile()
-    target_email = profile.bank_sender_email or os.getenv('BANK_SENDER_EMAIL')
-    
-    scraper = GmailScraper()
-    existing_bronze_ids = get_already_processed_ids(BRONZE_FILE)
-
-    raw_emails = scraper.fetch_expense_emails(max_results=max_limit, query_addon=query_addon, target_email=target_email)
-    new_emails = []
-    total_raw = len(raw_emails)
-    for i, email in enumerate(raw_emails):
-        if progress_callback:
-            progress_callback(i + 1, total_raw)
-            
-        if email["id"] in existing_bronze_ids:
-            continue
-
-        if last_saved_dt:
-            try:
-                email_dt = datetime.strptime(email.get('email_date', ''), "%Y-%m-%d")
-                if email_dt <= last_saved_dt:
-                    continue
-            except Exception:
-                pass
-
-        new_emails.append(email)
-
-    new_emails.sort(key=lambda e: (e.get("date", ""), e.get("time", "")))
-
-    elapsed = time.time() - start_time
-    if new_emails:
-        logger.info(f"Writing {len(new_emails)} new messages to Bronze layer...")
-        with open(BRONZE_FILE, "a", encoding="utf-8") as b_f:
-            for m in new_emails:
-                b_f.write(json.dumps(m, ensure_ascii=False) + "\n")
-        logger.info(f"✅ Ingestion completed successfully - Time taken: {elapsed:.2f}s")
-    else:
-        logger.info(f"✅ No new emails found compared to local Bronze - Time taken: {elapsed:.2f}s")
-
-
-def ingest_excel(uploaded_file, progress_callback=None):
-    start_time = time.time()
-    logger.info("="*40)
-    logger.info("📥 PHASE: EXCEL INGESTION")
+    logger.info("📥 PHASE: TABULAR INGESTION")
     logger.info("="*40)
     os.makedirs("data", exist_ok=True)
     
@@ -118,17 +50,24 @@ def ingest_excel(uploaded_file, progress_callback=None):
     skip_rows = profile.skip_rows
     mapping = profile.column_mapping
 
+    encoding = getattr(profile, 'encoding', 'utf-8')
+    delimiter = getattr(profile, 'delimiter', ',')
+    
     try:
-        # Load excel skipping rows from profile.
-        df = pd.read_excel(uploaded_file, skiprows=skip_rows)
+        # Load file. Pandas handles both Excel and CSV if we use appropriate loaders.
+        filename = getattr(uploaded_file, 'name', '').lower()
+        if filename.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, skiprows=skip_rows, encoding=encoding, sep=delimiter)
+        else:
+            df = pd.read_excel(uploaded_file, skiprows=skip_rows)
     except Exception as e:
-        logger.error(f"Failed to read excel file: {e}")
+        logger.error(f"Failed to read file: {e}")
         return 0
         
     expected_cols = [mapping.date, mapping.operation, mapping.amount]
     for col in expected_cols:
         if col not in df.columns:
-            logger.error(f"Missing expected column '{col}' in the uploaded excel. Check Settings.")
+            logger.error(f"Missing expected column '{col}' in the uploaded file. Check Settings.")
             return 0
             
     # Remove empty rows based on necessary columns
@@ -138,13 +77,7 @@ def ingest_excel(uploaded_file, progress_callback=None):
     has_bank_category = mapping.category_hint in df.columns if mapping.category_hint else False
     
     new_records = []
-    
-    # Check already processed excel rows? We might need an ID.
-    # We can create a pseudo-ID based on Data + Operazione + Importo, or just ingest everything
-    # and then in `process` deduplicate, but standard behavior usually assigns the hash as ID if no ID exists.
-    import hashlib
-    
-    existing_bronze_ids = get_already_processed_ids(BRONZE_EXCEL)
+    existing_bronze_ids = get_already_processed_ids(BRONZE_RAW)
     
     total_df = len(df)
     for idx, row in df.iterrows():
@@ -152,23 +85,26 @@ def ingest_excel(uploaded_file, progress_callback=None):
             progress_callback(int(idx) + 1, total_df)
             
         raw_date = row[mapping.date]
-        # More robust date handling:
+        # Robust date parsing using pandas powerful inference
         try:
-            if pd.api.types.is_datetime64_any_dtype(df[mapping.date]):
-                parsed_dt = raw_date
-            else:
-                parsed_dt = pd.to_datetime(raw_date, format=profile.date_format, errors="coerce")
-            
+            parsed_dt = pd.to_datetime(raw_date, dayfirst=True, errors="coerce")
             if pd.notna(parsed_dt):
                 date_str = parsed_dt.strftime("%Y-%m-%d")
             else:
                 date_str = str(raw_date)
-        except:
+        except Exception:
             date_str = str(raw_date)
             
         operation = str(row[mapping.operation])
         details = str(row[mapping.details]) if mapping.details in df.columns and pd.notna(row[mapping.details]) else ""
-        amount = float(row[mapping.amount]) if pd.notna(row[mapping.amount]) else 0.0
+        
+        try:
+            amount = float(row[mapping.amount]) if pd.notna(row[mapping.amount]) else 0.0
+            if getattr(profile, 'invert_signs', False):
+                amount = -amount
+        except (ValueError, TypeError):
+            logger.warning(f"Could not parse amount '{row[mapping.amount]}' at row {idx}")
+            amount = 0.0
         
         # Create an ID hash including the index to distinguish consecutive identical transactions
         hash_string = f"{date_str}_{operation}_{amount}_{idx}".encode('utf-8')
@@ -198,11 +134,20 @@ def ingest_excel(uploaded_file, progress_callback=None):
         
     elapsed = time.time() - start_time
     if new_records:
-        with open(BRONZE_EXCEL, "a", encoding="utf-8") as b_f:
+        with open(BRONZE_RAW, "a", encoding="utf-8") as b_f:
             for m in new_records:
                 b_f.write(json.dumps(m, ensure_ascii=False) + "\n")
-        logger.info(f"✅ Excel Ingestion completed successfully: {len(new_records)} new rows saved - Time taken: {elapsed:.2f}s")
+        logger.info(f"✅ Ingestion completed: {len(new_records)} new rows saved - Time taken: {elapsed:.2f}s")
     else:
-        logger.info(f"✅ Excel Ingestion completed: no new rows to add - Time taken: {elapsed:.2f}s")
+        logger.info(f"✅ Ingestion completed: no new rows to add - Time taken: {elapsed:.2f}s")
         
     return len(new_records)
+
+
+# --- Backward Compatibility Aliases ---
+def run_ingestion(*args, **kwargs):
+    """Stub for the removed Gmail ingestion logic."""
+    logger.warning("run_ingestion (Gmail) has been removed. Use tabular data ingestion instead.")
+    return 0
+
+ingest_excel = ingest_tabular_data

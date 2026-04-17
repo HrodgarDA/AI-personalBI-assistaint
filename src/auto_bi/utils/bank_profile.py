@@ -1,8 +1,9 @@
 import os
 import json
 import logging
+from functools import lru_cache
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,13 @@ class ColumnMapping(BaseModel):
     category_hint: str = "Categoria"
 
 class BankProfile(BaseModel):
-    profile_name: str = "Intesa Sanpaolo (Default)"
-    skip_rows: int = 18
+    profile_name: str = "Default"
+    skip_rows: int = 0
     column_mapping: ColumnMapping = ColumnMapping()
     date_format: str = "%d/%m/%Y"
-    bank_sender_email: str = "notifiche@intesasanpaolo.com"
+    invert_signs: bool = False
+    encoding: str = "utf-8"
+    delimiter: str = ","
     custom_prompt: str = ""
     incoming_keywords: List[str] = [
         "a vostro favore", "accredito", "stipendio",
@@ -31,33 +34,78 @@ class BankProfile(BaseModel):
         r"PAGAMENTO CARTA",
         r"ACQUISTO"
     ]
+    rules_memory: List[str] = []
     config_model: str = "llama3:8b"
+    classification_model: str = "gemma4-e4b-4bit"
+    merchant_aliases: Dict[str, str] = {}
+    category_mapping: Dict[str, str] = {}
+    outgoing_categories: List[str] = [
+        "Subscriptions", "Utilities", "Home", "Dining", "Shopping", 
+        "Health", "Transport", "Groceries", "Savings", "Gifts", "Financial", "Other"
+    ]
+    incoming_categories: List[str] = ["Salary", "Refund", "Transfer", "Gift", "Other"]
 
-def get_profile_path() -> str:
+def get_profiles_dir() -> str:
     from auto_bi.utils.config import DATA_DIR
-    return os.path.join(DATA_DIR, "bank_profile.json")
+    path = os.path.join(DATA_DIR, "profiles")
+    os.makedirs(path, exist_ok=True)
+    return path
 
-def load_bank_profile() -> BankProfile:
-    path = get_profile_path()
+def get_active_profile_path() -> str:
+    from auto_bi.utils.config import DATA_DIR
+    return os.path.join(DATA_DIR, "active_profile.txt")
+
+def set_active_profile_name(name: str):
+    if not name: return
+    path = get_active_profile_path()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(str(name))
+    # CRITICAL: Clear cache so next load_bank_profile() reads the new active name
+    load_bank_profile.cache_clear()
+
+def get_active_profile_name() -> str:
+    path = get_active_profile_path()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            name = f.read().strip()
+            if name: return name
+    return None
+
+def list_profiles() -> List[str]:
+    d = get_profiles_dir()
+    profiles = [f.replace(".json", "") for f in os.listdir(d) if f.endswith(".json")]
+    if not profiles:
+        return []
+    return profiles
+
+@lru_cache(maxsize=32)
+def load_bank_profile(name: str = None) -> BankProfile:
+    if name is None:
+        name = get_active_profile_name()
+    
+    path = os.path.join(get_profiles_dir(), f"{name}.json")
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return BankProfile(**data)
         except Exception as e:
-            logger.error(f"Error loading bank profile: {e}. Using defaults.")
+            logger.error(f"Error loading bank profile '{name}': {e}. Using defaults.")
     
-    # If not exists or error, return default and save it
-    profile = BankProfile()
-    save_bank_profile(profile)
+    # If not exists or error, return a fresh profile object BUT DO NOT SAVE IT YET
+    profile = BankProfile(profile_name=name if name else "New Profile")
+    if name: # Only cache if a name was provided
+        load_bank_profile.cache_clear()
     return profile
 
 def save_bank_profile(profile: BankProfile):
-    path = get_profile_path()
+    name = profile.profile_name or get_active_profile_name()
+    path = os.path.join(get_profiles_dir(), f"{name}.json")
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile.model_dump(), f, indent=4, ensure_ascii=False)
-            logger.info(f"Bank profile saved to {path}")
+            logger.info(f"Bank profile '{name}' saved to {path}")
+            # Clear cache to ensure next load gets updated version
+            load_bank_profile.cache_clear()
     except Exception as e:
-        logger.error(f"Error saving bank profile: {e}")
+        logger.error(f"Error saving bank profile '{name}': {e}")
