@@ -18,9 +18,9 @@ from auto_bi.utils.prompts import (
 from auto_bi.utils.config import (
     MODEL_ID, OLLAMA_BASE_URL, SEARCH_TIMEOUT, SEARCH_BACKENDS, 
     MERCHANT_CATALOGUE, EXTRACTION_CACHE, BRONZE_RAW, LLM_TIMEOUT, MAX_RETRIES,
-    LLM_BATCH_SIZE
+    LLM_BATCH_SIZE, BANK_CATEGORY_MAP
 )
-from auto_bi.utils.utils import clean_search_query, is_valid_search_query, normalize_merchant_name
+from auto_bi.utils.utils import clean_search_query, is_valid_search_query, normalize_merchant_name, levenshtein_ratio
 from auto_bi.utils.bank_profile import load_bank_profile
 
 load_dotenv()
@@ -58,6 +58,10 @@ class TransactionParser:
         )
         self.outgoing_batch_model = create_batch_model(self.outgoing_model)
         self.incoming_batch_model = create_batch_model(self.incoming_model)
+        
+        # --- Bank Hint Mapping Cache ---
+        self.bank_map_path = BANK_CATEGORY_MAP
+        self.bank_map_cache = self._load_cache(self.bank_map_path)
 
     def _load_cache(self, path: str) -> dict:
         if os.path.exists(path):
@@ -88,6 +92,12 @@ class TransactionParser:
             with open(temp_extraction, "w", encoding="utf-8") as f:
                 json.dump(self.extraction_cache, f, indent=2, ensure_ascii=False)
             os.replace(temp_extraction, self.extraction_cache_path)
+            
+            # Save Bank Map Cache atomically
+            temp_bank = self.bank_map_path + ".tmp"
+            with open(temp_bank, "w", encoding="utf-8") as f:
+                json.dump(self.bank_map_cache, f, indent=2, ensure_ascii=False)
+            os.replace(temp_bank, self.bank_map_path)
                 
             self.normalized_cache = {normalize_merchant_name(k): v for k, v in self.merchant_cache.items() if normalize_merchant_name(k)}
             logger.info("💾 Caches saved successfully.")
@@ -142,7 +152,7 @@ class TransactionParser:
             
         return self._raw_data_cache
 
-    def _build_feedback_context(self) -> str:
+    def _build_feedback_context(self, limit: int = 20) -> str:
         feedback_path = "data/user_feedback.json"
         if not os.path.exists(feedback_path):
             return ""
@@ -154,7 +164,7 @@ class TransactionParser:
             if not feedbacks:
                 return ""
             
-            feedbacks = feedbacks[-5:]
+            feedbacks = feedbacks[-limit:] if limit > 0 else []
             data_map = self._get_raw_data_map()
             
             examples = []
@@ -164,11 +174,11 @@ class TransactionParser:
                     detail = data_map[mid].strip()
                     if len(detail) > 250:
                         detail = detail[:250] + "..."
-                    ex = f"- Transaction text: '{detail}'\n  -> Correct Category: {fb.get('corrected_category')} (Correct Amount: {fb.get('corrected_amount')})"
+                    ex = f"- Transaction text: '{detail}'\n  -> Correct Category: {fb.get('corrected_category')} (Correct Merchant: {fb.get('corrected_merchant')})"
                     examples.append(ex)
                     
             if examples:
-                return "\nHere are some examples of past corrections to guide you:\n" + "\n".join(examples)
+                return "\nHere are some examples of past corrections to guide you (RAG Memory):\n" + "\n".join(examples)
         except Exception as e:
             logger.warning(f"Error building feedback context: {e}")
             
@@ -217,6 +227,35 @@ class TransactionParser:
             logger.warning(f"Error during parallel web search: {e}")
             
         return ""
+
+    def _semantic_catalog_lookup(self, merchant_name: str) -> Optional[str]:
+        """Finds a category for a merchant using fuzzy matching against the catalogue."""
+        if not merchant_name or merchant_name.lower() == "unknown":
+            return None
+            
+        target = normalize_merchant_name(merchant_name)
+        if not target: return None
+        
+        # 1. Direct hit in normalized cache (fast)
+        if target in self.normalized_cache:
+            return self.normalized_cache[target]
+            
+        # 2. Fuzzy hit (slow but smart)
+        best_match = None
+        best_score = 0.0
+        
+        for cat_merchant, category in self.merchant_cache.items():
+            norm_cat = normalize_merchant_name(cat_merchant)
+            if not norm_cat: continue
+            
+            score = levenshtein_ratio(target, norm_cat)
+            if score > 0.85 and score > best_score:
+                best_score = score
+                best_match = category
+                
+        if best_match:
+            logger.info(f"🧠 [SEMANTIC] Fuzzy matched '{merchant_name}' to catalogue entry (score: {best_score:.2f})")
+        return best_match
 
     def _fuzzy_extract_lookup(self, text: str) -> Optional[str]:
         """Attempt to find a similar transaction in the extraction cache by ignoring IDs/dates."""
@@ -293,7 +332,7 @@ class TransactionParser:
         system_prompt = system_prompt.replace("{categories_block}", cats_block)
 
         # Inject context (Feedback, Rules, Hints)
-        feedback = self._build_feedback_context()
+        feedback = self._build_feedback_context(limit=20)
         system_prompt = system_prompt.replace("{user_feedback_examples}", feedback)
         
         rules_mem = getattr(self.profile, "rules_memory", [])
@@ -315,15 +354,10 @@ class TransactionParser:
         tx['historical_category'] = None
         tx['category_source'] = "llm_inference"
         
-        # 2. Lookup in catalogue
+        # 2. Lookup in catalogue (with semantic fallback)
         if tx['merchant'] != "Unknown":
-            m_key = tx['merchant'].strip().lower()
-            m_normalized = normalize_merchant_name(m_key)
-            if m_key in self.merchant_cache:
-                tx['historical_category'] = self.merchant_cache[m_key]
-                tx['category_source'] = "from_catalogue"
-            elif m_normalized in self.normalized_cache:
-                tx['historical_category'] = self.normalized_cache[m_normalized]
+            tx['historical_category'] = self._semantic_catalog_lookup(tx['merchant'])
+            if tx['historical_category']:
                 tx['category_source'] = "from_catalogue"
         return tx
 
@@ -385,7 +419,7 @@ class TransactionParser:
             indices = [x[0] for x in tx_group]
             tx_data = [x[1] for x in tx_group]
             
-            # Prepare Prompt
+            # Prepare Prompt (with RAG feedback)
             cats_block = "\n".join([f"- {c}" for c in config['cats']])
             # Add merchant hints to strings
             tx_strings = []
@@ -397,26 +431,46 @@ class TransactionParser:
             
             tx_block = "\n".join([f"{idx+1}. {txt}" for idx, txt in enumerate(tx_strings)])
             
+            # Optimized RAG for Batch Mode (limit to 5 items to prevent stalling)
+            feedback = self._build_feedback_context(limit=5)
+            
             rules_mem = getattr(self.profile, "rules_memory", [])
             custom_rules = f"\nRULES:\n{chr(10).join(rules_mem)}" if rules_mem else ""
             
             template_to_use = system_template if system_template else BATCH_CLASSIFICATION_TEMPLATE
             prompt = template_to_use.format(
                 categories_block=cats_block,
+                user_feedback_examples=feedback,
                 custom_user_rules=custom_rules,
                 transactions_block=tx_block
             )
 
+            # Model Selection (Multi-Model Strategy)
+            # Use fast_model if we have search hints (easier context) or if the model is set
+            use_fast = any(tx.get('hint') for tx in tx_data)
+            current_model = self.profile.fast_model_id if use_fast else self.model
+            
             # LLM Call
-            try:
-                logger.info(f"   🤖 [IA]  Processing block of {len(tx_group)} {direction} transactions... (thinking)")
-                batch_res = self.client.chat.completions.create(
-                    model=self.model,
+            def execute_llm_call(model_name):
+                return self.client.chat.completions.create(
+                    model=model_name,
                     temperature=0.0,
                     response_model=config['model'],
                     messages=[{"role": "system", "content": prompt}],
-                    timeout=LLM_TIMEOUT * 2 # Double timeout for batches
+                    timeout=LLM_TIMEOUT * 2
                 )
+
+            try:
+                logger.info(f"   🤖 [IA]  Processing block using {current_model} ({'Fast' if use_fast else 'Big'} Mode)...")
+                try:
+                    batch_res = execute_llm_call(current_model)
+                except Exception as e:
+                    # Retry logic: only if fast model failed AND big model is actually different
+                    if current_model == self.profile.fast_model_id and self.model != self.profile.fast_model_id:
+                        logger.warning(f"   ⚠️ [IA] Fast model ({current_model}) failed. Retrying with Big model ({self.model})... Error: {e}")
+                        batch_res = execute_llm_call(self.model)
+                    else:
+                        raise e
                 
                 # Assign results
                 for idx_in_batch, res in enumerate(batch_res.results):
@@ -435,13 +489,12 @@ class TransactionParser:
                             "category": res.category.value,
                             "merchant": res.merchant,
                             "amount": getattr(res, 'amount', tx.get('amount')),
-                            "confidence": res.confidence,
+                            "confidence": float(res.confidence if res.confidence is not None else 0.0),
                             "reasoning": res.reasoning,
                             "category_source": tx['category_source']
                         }
             except Exception as e:
-                logger.error(f"Error in batch IA processing: {e}")
-                # Fallback: flag remaining as failed or mark them one by one (could be skipped for now)
+                logger.error(f"   ❌ [IA] Critical error in batch processing: {e}")
 
         # Fill any missing results from errors
         for i in range(len(results)):
@@ -459,7 +512,64 @@ class TransactionParser:
 
         return results
 
-    def classify_transaction(self, text: str, direction: str, merchant: str = None, amount: float = None) -> dict:
+    def classify_transaction(self, text: str, direction: str, merchant: str = None, amount: float = None, system_template: str = None) -> dict:
         """Proxy to classify_batch for backward compatibility."""
-        res = self.classify_batch([{"text": text, "direction": direction, "merchant": merchant, "amount": amount}])
+        res = self.classify_batch([{"text": text, "direction": direction, "merchant": merchant, "amount": amount}], system_template=system_template)
         return res[0]
+
+    def map_bank_category(self, bank_hint: str, direction: str) -> Optional[Dict[str, Any]]:
+        """
+        Maps a bank category hint to a system category using semantical LLM mapping.
+        Uses -1 as special confidence flag.
+        """
+        if not bank_hint:
+            return None
+            
+        cache_key = f"{direction}:{bank_hint}"
+        if cache_key in self.bank_map_cache:
+            return {
+                "category": self.bank_map_cache[cache_key]["category"],
+                "merchant": "Bank Hint Mapping",
+                "confidence": -1.0,
+                "reasoning": self.bank_map_cache[cache_key]["reasoning"],
+                "category_source": "bank_hint_mapping"
+            }
+            
+        try:
+            from auto_bi.utils.prompts import BANK_HINT_MAPPING_TEMPLATE
+            
+            categories = self.profile.outgoing_categories if direction == "Outgoing" else self.profile.incoming_categories
+            cats_block = "\n".join([f"- {c}" for c in categories])
+            
+            prompt = BANK_HINT_MAPPING_TEMPLATE.format(
+                categories_block=cats_block,
+                direction=direction,
+                bank_hint=bank_hint
+            )
+            
+            # Use dynamic model for validation
+            system_model = self.outgoing_model if direction == "Outgoing" else self.incoming_model
+            
+            res = self.client.chat.completions.create(
+                model=self.model,
+                response_model=system_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            # Cache the result
+            self.bank_map_cache[cache_key] = {
+                "category": res.category.value,
+                "reasoning": f"(Bank: {bank_hint}) -> {res.reasoning}"
+            }
+            self.save_caches()
+            
+            return {
+                "category": res.category.value,
+                "merchant": "Bank Hint Mapping",
+                "confidence": -1.0,
+                "reasoning": self.bank_map_cache[cache_key]["reasoning"],
+                "category_source": "bank_hint_mapping"
+            }
+        except Exception as e:
+            logger.warning(f"Error mapping bank category '{bank_hint}': {e}")
+            return None

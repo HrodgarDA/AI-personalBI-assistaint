@@ -5,7 +5,7 @@ import time
 import pandas as pd
 import hashlib
 from datetime import datetime
-from auto_bi.utils.config import BRONZE_RAW
+from auto_bi.utils.config import BRONZE_RAW, PERF_STATS, SILVER_FILE, DELETED_IDS_FILE
 from auto_bi.utils.bank_profile import load_bank_profile
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,90 @@ def ingest_tabular_data(uploaded_file, progress_callback=None):
         logger.info(f"✅ Ingestion completed: no new rows to add - Time taken: {elapsed:.2f}s")
         
     return len(new_records)
+
+
+def analyze_file_for_ui(uploaded_file):
+    """
+    Analyzes an uploaded file to provide UI metrics: total rows, new rows, and estimated time.
+    """
+    profile = load_bank_profile()
+    mapping = profile.column_mapping
+    
+    try:
+        # 1. Read file
+        filename = getattr(uploaded_file, 'name', '').lower()
+        if filename.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, skiprows=profile.skip_rows, 
+                             encoding=getattr(profile, 'encoding', 'utf-8'), 
+                             sep=getattr(profile, 'delimiter', ','))
+        else:
+            df = pd.read_excel(uploaded_file, skiprows=profile.skip_rows)
+            
+        # Basic validation: ensure mapping columns exist
+        for col in [mapping.date, mapping.operation, mapping.amount]:
+            if col not in df.columns:
+                return {"total_rows": 0, "new_rows": 0, "estimated_seconds": 0, "error": f"Missing column '{col}'"}
+
+        df = df.dropna(subset=[mapping.date, mapping.operation, mapping.amount])
+        total_rows = len(df)
+        
+        # 2. Identify new rows (relative to Silver layer and Blacklist)
+        # This tells us how many rows will actually trigger LLM processing
+        existing_silver_ids = get_already_processed_ids(SILVER_FILE)
+        
+        # Also respect deleted IDs (Blacklist) if the file exists
+        deleted_ids_set = set()
+        if os.path.exists(DELETED_IDS_FILE):
+            try:
+                with open(DELETED_IDS_FILE, "r", encoding="utf-8") as f:
+                    deleted_ids_set = set(str(did) for did in json.load(f))
+            except Exception: pass
+
+        new_to_process_count = 0
+        
+        for idx, row in df.iterrows():
+            raw_date = row[mapping.date]
+            try:
+                parsed_dt = pd.to_datetime(raw_date, dayfirst=True, errors="coerce")
+                date_str = parsed_dt.strftime("%Y-%m-%d") if pd.notna(parsed_dt) else str(raw_date)
+            except Exception:
+                date_str = str(raw_date)
+                
+            operation = str(row[mapping.operation])
+            amount = 0.0
+            try:
+                amount = float(row[mapping.amount])
+            except (ValueError, TypeError): pass
+            
+            # Recreate the exact same ID logic as in ingestion/process
+            hash_string = f"{date_str}_{operation}_{amount}_{idx}".encode('utf-8')
+            pseudo_id = hashlib.md5(hash_string).hexdigest()
+            
+            # If not in Silver AND not in Blacklist, it will be processed
+            if pseudo_id not in existing_silver_ids and pseudo_id not in deleted_ids_set:
+                new_to_process_count += 1
+                
+        # 3. Get speed and calculate time
+        avg_speed = 2.0 # Default fallback
+        if os.path.exists(PERF_STATS):
+            try:
+                with open(PERF_STATS, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+                    avg_speed = stats.get("avg_speed_seconds", 2.0)
+            except Exception: pass
+            
+        estimated_seconds = new_to_process_count * avg_speed
+        
+        return {
+            "total_rows": total_rows,
+            "new_rows": new_to_process_count,
+            "estimated_seconds": estimated_seconds,
+            "avg_speed": avg_speed
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing file: {e}")
+        return {"total_rows": 0, "new_rows": 0, "estimated_seconds": 0, "error": str(e)}
 
 
 # --- Backward Compatibility Aliases ---

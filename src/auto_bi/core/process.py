@@ -6,7 +6,7 @@ import time
 import concurrent.futures
 from auto_bi.core.extractor import TransactionParser
 from auto_bi.core.ingestion import get_already_processed_ids
-from auto_bi.utils.config import BRONZE_RAW, SILVER_FILE, GOLD_FILE
+from auto_bi.utils.config import BRONZE_RAW, SILVER_FILE, GOLD_FILE, DELETED_IDS_FILE, PERF_STATS, LEGACY_SILVER
 from auto_bi.utils.utils import extract_merchant_from_excel
 from auto_bi.utils.bank_profile import load_bank_profile
 
@@ -64,6 +64,15 @@ def _print_recap(total_time: float, records: list, failed_count: int = 0):
         logger.info(f"   - Merchant:     {slowest['merchant']}")
         logger.info(f"   - Mode:         {slowest['mode']}")
         logger.info(f"   - Time:         {slowest['duration']:.2f}s")
+    
+    # Save average speed for future estimates
+    if avg_time > 0:
+        try:
+            with open(PERF_STATS, "w", encoding="utf-8") as f:
+                json.dump({"avg_speed_seconds": avg_time, "last_updated": time.time()}, f)
+            logger.info(f"💾 Performance stats saved (Avg speed: {avg_time:.2f}s/tx)")
+        except Exception as e:
+            logger.warning(f"Could not save perf stats: {e}")
         
     logger.info("\n" + "═"*50 + "\n")
 
@@ -79,35 +88,38 @@ def _check_llm_health() -> bool:
         return False
 
 
-def save_to_silver(new_records, current_state=None):
+def migrate_silver_to_jsonl():
+    """Converts legacy .json silver file to .jsonl format if it exists."""
+    if os.path.exists(LEGACY_SILVER) and not os.path.exists(SILVER_FILE):
+        logger.info(f"🚚 Migrating legacy silver file to JSONL: {LEGACY_SILVER} -> {SILVER_FILE}")
+        try:
+            with open(LEGACY_SILVER, "r", encoding="utf-8") as f:
+                records = json.load(f)
+            
+            with open(SILVER_FILE, "w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            
+            # Keep the old file as backup for now, or rename it
+            os.rename(LEGACY_SILVER, LEGACY_SILVER + ".bak")
+            logger.info("✅ Migration completed successfully.")
+        except Exception as e:
+            logger.error(f"❌ Migration failed: {e}")
+
+
+def save_to_silver(new_records):
     """
-    Appends new records to the silver JSON file.
-    If current_state is provided, it uses it instead of re-reading from disk.
+    Appends new records to the silver JSONL file (Atomic Append).
     """
-    if current_state is not None:
-        data = current_state
-    else:
-        data = []
-        if os.path.exists(SILVER_FILE):
-            with open(SILVER_FILE, 'r', encoding='utf-8') as f:
-                try: 
-                    data = json.load(f)
-                except Exception: 
-                    data = []
-    
-    # Handle both Pydantic models and dictionaries
-    new_data = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
-    data.extend(new_data)
-    
     os.makedirs(os.path.dirname(SILVER_FILE), exist_ok=True)
     
-    # Atomic write-then-rename to prevent corruption
-    temp_file = SILVER_FILE + ".tmp"
-    with open(temp_file, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    os.replace(temp_file, SILVER_FILE)
-    
-    return data
+    try:
+        with open(SILVER_FILE, 'a', encoding='utf-8') as f:
+            for r in new_records:
+                data = r.model_dump() if hasattr(r, 'model_dump') else r
+                f.write(json.dumps(data, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to append records to silver: {e}")
 
 
 def run_certify():
@@ -121,18 +133,27 @@ def run_certify():
         logger.error("Silver file missing. Run processing first.")
         return
 
+    records = []
     with open(SILVER_FILE, 'r', encoding='utf-8') as f:
-        try:
-            records = json.load(f)
-        except Exception as e:
-            logger.error(f"Cannot read {SILVER_FILE}: {e}")
-            return
+        for line in f:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
 
     if not records:
         logger.info(f"✅ No records to certify. - Time taken: {time.time() - start_time:.2f}s")
         return
 
     # Normalization & Cleaning
+    LEGACY_MAP = {
+        "Dining": "Dining & Entertainment",
+        "Health": "Health & Sport",
+        "Savings": "Savings & Investments",
+        "Home & Utilities": "Utilities",
+        "Refunds": "Refund"
+    }
+
     for r in records:
         if "time" not in r or not r["time"]:
             r["time"] = "00:00"
@@ -144,8 +165,10 @@ def run_certify():
         elif tip == "salary":
             r["tipology"] = "Incoming"
             
-        if r.get("category") == "Refunds":
-            r["category"] = "Refund"
+        # Normalize categories
+        cat = r.get("category")
+        if cat in LEGACY_MAP:
+            r["category"] = LEGACY_MAP[cat]
 
     records.sort(key=lambda x: (x.get("date", ""), x.get("time", "")))
 
@@ -171,6 +194,15 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         logger.info(f"No raw data found at {BRONZE_RAW}. Upload data first.")
         return
 
+    # 0. Migration & Pre-flight
+    migrate_silver_to_jsonl()
+    
+    if not _check_llm_health():
+        logger.error("❌ CRITICAL: Ollama server is unreachable. Ensure Ollama is running.")
+        if progress_callback:
+            progress_callback(0, 1, status="❌ Ollama Unreachable")
+        return
+
     # 1. Load context once
     all_raw = []
     with open(BRONZE_RAW, "r", encoding="utf-8") as f:
@@ -181,17 +213,35 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                 continue
             
     # Load silver state once to avoid repeated disk hits
-    silver_state = []
+    processed_silver_ids = set()
     if os.path.exists(SILVER_FILE):
         with open(SILVER_FILE, 'r', encoding='utf-8') as f:
-            try: silver_state = json.load(f)
-            except Exception: silver_state = []
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    processed_silver_ids.add(str(record.get("id")))
+                except Exception:
+                    continue
             
-    processed_silver_ids = {str(r.get("id")) for r in silver_state}
-    to_process = [m for m in all_raw if str(m["id"]) not in processed_silver_ids]
+    # Load deleted IDs (Blacklist)
+    deleted_ids = []
+    if os.path.exists(DELETED_IDS_FILE):
+        try:
+            with open(DELETED_IDS_FILE, "r", encoding="utf-8") as f:
+                deleted_ids = json.load(f)
+        except Exception:
+            deleted_ids = []
+    
+    deleted_ids_set = {str(did) for did in deleted_ids}
+    
+    # Filter: Not in Silver AND Not in Blacklist
+    to_process = [
+        m for m in all_raw 
+        if str(m["id"]) not in processed_silver_ids and str(m["id"]) not in deleted_ids_set
+    ]
     
     if not to_process:
-        logger.info(f"✅ Silver Layer already synced. Nothing to process. - Time taken: {time.time() - start_time:.2f}s")
+        logger.info(f"✅ Silver Layer synced and Blacklist respected. Nothing to process. - Time taken: {time.time() - start_time:.2f}s")
         return
         
     logger.info(f"Starting to process {len(to_process)} transactions.")
@@ -274,7 +324,8 @@ def run_processing(batch_size: int = 5, progress_callback=None):
         if tx_to_classify:
             t0 = time.time()
             logger.info(f"   ⚙️ Preparing batch for LLM...")
-            batch_results = parser.classify_batch([{"text": x['text'], "direction": x['direction'], "merchant": x['merchant'], "amount": x['amount']} for x in tx_to_classify])
+            # Pass full transaction records to ensure fallback logic has access to raw data
+            batch_results = parser.classify_batch(tx_to_classify)
             duration_per_tx = (time.time() - t0) / len(tx_to_classify)
             
             for idx, res in enumerate(batch_results):
@@ -326,7 +377,11 @@ def run_processing(batch_size: int = 5, progress_callback=None):
                 })
 
         if new_silver_entries:
-            silver_state = save_to_silver(new_silver_entries, current_state=silver_state)
+            save_to_silver(new_silver_entries)
+            # Add to our local set to prevent any double processing in same run
+            for entry in new_silver_entries:
+                processed_silver_ids.add(str(entry["id"]))
+                
             parser.save_caches()
             if progress_callback:
                 progress_callback(total_processed_instances, total_rows)

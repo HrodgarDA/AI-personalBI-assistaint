@@ -1,66 +1,90 @@
-# AI-personal BI-assistaint
-Personal expenses tracker powered by AI
+# Personal Business Intelligence AI powered system
+> Personal expenses tracking and classification powered by an advanced AI engine.
 
-## 🚀 What it does now
-This project supports a complete, end-to-end Medallion ETL flow (Bronze ➔ Silver ➔ Gold) with an interactive Web Dashboard:
-- 📩 **Ingestion**: Downloading bank notification emails from Gmail via API, actively capturing subject and body contexts.
-- 🧱 **Bronze Layer**: Saving raw messages to `data/bronze_raw_emails.jsonl`
-- 🤖 **Intelligent Extraction**: Using LLMs to read the full context to classify explicitly into Typologies (Expenses, Salaries, Refunds) and allocate proper negative/positive signs. Optionally performs a Web Search (DuckDuckGo) to understand unknown merchants.
-- 💾 **Silver Layer**: Saving normalized transactions to `data/silver_expenses.json`
-- 🏅 **Gold Layer**: Curating certified tabular data into `data/gold_certified_data.csv`
-- 📊 **Web Application**: An advanced Streamlit Personal BI Dashboard to visualize dual Salary vs. Expenses trends, filter granularities, and edit raw records!
+---
 
-## 🧩 Architecture
-- `src/gmail_client.py`: Gmail authentication + scraping emails from the configured sender
-- `src/main.py`: Main CLI tool to trigger `--ingest`, `--process`, and `--certify` phases
-- `src/extractor.py`: AI parsing with `instructor` and local OpenAI, injected with DuckDuckGo web search
-- `src/models.py`: Unified Pydantic schemas for parsing transactional records (`Tipology` mapping to Expense/Salary/Refund)
-- `src/prompts.py`: Extraction prompts and LLM templates
-- `src/feedback.py`: Manages the user feedback loop from the UI back to the Silver Data
-- `webapp.py`: Premium Streamlit application managing both Data Visualization and ETL execution
+## 🔒 Privacy-First Architecture
+**100% Private & Local**: This system is designed with a "Privacy-First" mindset. All AI processing happens locally via **Ollama**, and all financial data is stored exclusively on your machine. **No cloud API calls, no data leaks, no third-party tracking.** Your financial life remains entirely your own.
 
-## 📁 Output files
-- `data/bronze_raw_emails.jsonl`: Bronze layer with raw emails and metadata
-- `data/silver_expenses.json`: Silver layer with extracted and normalized transactions
-- `data/gold_certified_data.csv`: Analytical layer ready to be visualized
-- `data/user_feedback.json`: Internal ledger recording all user overrides for AI few-shot prompting
+---
 
-## ⚙️ Environment variables
-Set these variables in your `.env` file or environment:
-- `BANK_SENDER_EMAIL`: bank notification sender email to filter
-- `MODEL_ID`: local LLM model ID
-- `FORCE_FULL_LOAD`: `true` to force a full data load
-- `MAX_EMAILS`: maximum number of emails to download
+## 🏗️ Architecture: The Medallion Paradigm
+The system is built according to modern Data Engineering principles, ensuring data integrity and traceability at every stage:
 
-## 🏃‍♂️ How to run
+*   **📩 Bronze Layer (Raw)**: Atomic ingestion of heterogeneous bank statement files (CSV, XLSX). Raw data is persisted in `JSONL` format to ensure the immutability of the source.
+*   **🤖 Silver Layer (AI-Enriched)**: The core of the system. Data is validated, enriched, and categorized via LLMs. We implement **Atomic JSONL persistence** to ensure data integrity; every record is appended independently, preventing database corruption during hardware failures or AI stalls.
+*   **🏅 Gold Layer (Certified)**: Certified final datasets optimized in analytical `CSV` format, ready for consumption by the dashboard or other OLAP tools.
 
-### 1. Run the Web Dashboard
-You can run the full UI which allows triggering the ETL phases directly via interface:
+---
+
+## 🧠 The AI Engine: Advanced Intelligence Layer
+Unlike systems based on simple Regex, this platform implements advanced AI logic for maximum precision:
+
+### 1. Dual-Tier Model Strategy
+Smart workload optimization via dispatching between two models:
+*   **Fast Mode (Gemma 2)**: Rapid categorization for standard transactions and known patterns.
+*   **Big Mode (Qwen 3)**: Complex reasoning, detailed extraction, and recovery analysis for ambiguous cases.
+
+### 2. Expert RAG Memory (Long-term Learning)
+Implementation of a **RAG (Retrieval-Augmented Generation)** memory buffer. The system injects up to 20 real examples of your past corrections into the AI context, allowing the engine to learn your personal preferences over time without the need for fine-tuning.
+
+### 3. Fuzzy Semantic Aliaser & Entity Resolution
+A proprietary normalization engine based on **Levenshtein** algorithms. It identifies and unifies similar merchants (e.g., `Amazon IT` vs. `AMZN Digital`) avoiding redundant AI queries for known patterns, drastically reducing latency and resource consumption.
+
+### 4. Multi-Bank Federated Ingestor
+Bank-agnostic architecture. Using AI **Ghost Models**, the system can automatically infer the structure of new file formats (columns, amounts, and dates) and generate a dynamic "Bank Profile" without writing a single line of code.
+
+### 5. Layer of Last Resort (Bank Hint Mapping)
+Robust fallback mechanism: if all AI analyses fail, the system performs a semantic mapping of the bank's original category hint onto your personal taxonomy, marking the record with a special confidence flag (`-1`) for easy manual review.
+
+---
+
+## 📊 Dashboard & UX
+*   **Cross-Filter Intelligence**: Explore financial trends with global filters synchronized in real-time.
+*   **Interactive Correction Loop**: Correct the AI directly from the data table; every modification instantly feeds the system's RAG memory.
+*   **Data Audit**: Granular visualization of the "Reasoning" behind every AI-driven classification.
+
+---
+
+## 🛠️ Setup & Installation
+The system is managed via **Poetry** for deterministic dependency management and is optimized for local execution on Apple Silicon (M1/M2/M3).
+
+### 1. Requirements
+*   Python 3.11+
+*   [Poetry](https://python-poetry.org/)
+*   [Ollama](https://ollama.ai/) (for running local LLM models)
+
+### 2. Installation
 ```bash
-poetry run streamlit run webapp.py
+# Clone the repository
+git clone https://github.com/HrodgarDA/AI-BI-assistaint.git
+cd AI-BI-assistaint
+
+# Install dependencies
+poetry install
 ```
 
-### 2. Manual CLI ETL Commands
-1. Run ingestion:
-   ```bash
-   poetry run python -m src.main --ingest
-   ```
-2. Run Two-Pass LLM processing:
-   ```bash
-   poetry run python -m src.main --process
-   ```
-3. Generate Gold CSV:
-   ```bash
-   poetry run python -m src.main --certify
-   ```
+### 3. AI Model Setup
+Ensure Ollama is running and download the required models:
+```bash
+ollama pull qwen3:8b
+ollama pull gemma2:2b
+```
 
-## ✅ What was done recently
-- **Unified Modeling & Typology**: Upgraded the AI logic to output single-schema Extractions where costs are negative values and incomes are positive values (Expense, Salary, Refund).
-- **Subject-Aware Prompts**: Bronze and Parsing layers now read and context-match Email subjects to ensure precision.
-- **Premium UI**: Enforced a responsive dark-mode Dashboard with split Line-Charts to distinctively plot inputs vs. outputs over time, and custom colored filters.
-- **Two-Pass Merchant Search**: The LLM queries DuckDuckGo for previously unknown merchants to enhance categorization accuracy.
-- **Few-Shot Feedback Loop**: Your corrections in the UI Table are fed back directly to the LLM system prompts.
-- **Global Dashboards filters**: Full analytics granularity selection (Day/Week/Month) with active states.
+### 4. Run the Application
+```bash
+poetry run streamlit run app/webapp.py
+```
 
-## 💡 Note
-The pipeline is built to scale following the Medallion Data Architecture (Bronze -> Silver -> Gold). The interactive Streamlit WebApp allows easy monitoring and self-correcting mechanisms!
+---
+
+## 🚀 Next Steps & Roadmap
+The system is constantly evolving towards total financial autonomy:
+
+1.  **🔍 Anomaly Detection**: Implementation of unsupervised ML algorithms (Isolation Forest) to identify suspicious transactions or unusual spending spikes.
+2.  **💰 Expenses Budgeting**: Smart financial planning system with predictive alerts based on current trends.
+3.  **💬 Personal Natural Language Query system**: An AI chat interface (RAG-based) allowing you to query your Gold financial data in natural language (e.g., *"How much more did I spend on dining out this month compared to last?"*).
+4.  **🎯 Autonomous Smart Savings**: Predictive engine analyzing cash flow to suggest realistic savings goals and monthly allocation plans.
+
+---
+*Developed with a focus on scalability, distributed intelligence, and data integrity.*

@@ -166,6 +166,8 @@ def load_data(path: Path = DATA_PATH):
             try:
                 row["confidence"] = float(row["confidence"])
             except (ValueError, TypeError):
-                pass
+                row["confidence"] = 0.0
+        else:
+            row["confidence"] = 0.0
         row["parsed_date"] = parse_date(row.get("date"))
     return rows

@@ -12,11 +12,15 @@ from auto_bi.core.noise_assistant import suggest_cleaning_patterns
 import re
 import json
 import time
+from auto_bi.core.recovery import run_error_recovery
 from auto_bi.utils.config import EXTRACTION_CACHE, MERCHANT_CATALOGUE
 
 logger = logging.getLogger(__name__)
 def render_settings():
     # --- CORE INITIALIZATION ---
+    # Force clear cache to handle background/manual profile updates
+    load_bank_profile.cache_clear()
+    
     active_name = get_active_profile_name()
     profile = load_bank_profile(active_name)
     all_profiles = list_profiles()
@@ -51,7 +55,7 @@ def render_settings():
                 set_active_profile_name(new_active)
                 st.rerun()
             
-        if st.button("➕ Create New Profile", use_container_width=True):
+        if st.button("➕ Create New Profile", width='stretch'):
             st.session_state["show_new_profile_dialog"] = True
             
         if st.session_state.get("show_new_profile_dialog"):
@@ -67,25 +71,69 @@ def render_settings():
     # --- MAIN UI ---
     show_advanced = st.session_state.get("show_adv_global", False)
     
-    # 4 TABS: Get Started, Auto-Configure, General Settings, AI & Memory
-    tab0, tab1, tab2, tab3 = st.tabs(["🏠 Get Started", "🚀 Auto-Configure", "⚙️ General Settings", "🧠 AI & Memory"])
+    # 3 TABS: Get Started, General Settings, AI & Memory
+    tab0, tab1, tab2 = st.tabs(["🏠 Get Started", "⚙️ General Settings", "🧠 AI & Memory"])
     
     with tab0:
-        st.subheader("Welcome to your personal BI assistaint!")
+        st.subheader("Welcome to your personal Business Intelligence assistaint!")
         st.write("Extract insights from your bank statements using AI. No manual data entry required.")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("### 1. 🚀 Discovery")
-            st.write("Upload a sample PDF/Excel/CSV. Our AI will automatically detect the columns and format.")
-        with c2:
-            st.markdown("### 2. 🧠 Training")
-            st.write("Fine-tune the classification rules or teach the system about specific regular merchants.")
-            
+        # --- SECTION: QUICK START ---
+        with st.expander("📖 **Quick Start Guide**", expanded=True):
+            st.markdown("""
+            Follow these steps to set up your assistant:
+            1. **Setup**: Create a **Bank Profile** in the sidebar or use the **Auto-Discovery** below.
+            2. **Ingest**: Upload your bank statement in the sidebar and click **Archive**.
+            3. **Analyze**: Click **Process** in the sidebar to let the AI categorize your transactions.
+            4. **Explore**: Visit the **Dashboard** and **Data Explorer** to see your financial insights!
+            """)
+        
+        # --- SECTION: DISCOVERY ---
         st.divider()
-        # Stats section
+        st.subheader("🚀 Smart Auto-Discovery")
+        st.write("Upload a sample file to automatically detect column mapping and data structure.")
+        
+        uploaded_file = st.file_uploader("Sample File (CSV/XLSX)", type=["xlsx", "xls", "csv"])
+        if uploaded_file:
+            if st.button("🔍 Run Auto-Discovery", type="primary", width='stretch'):
+                with st.status("Analyzing file schema...", expanded=True) as status:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
+                        tmp.write(uploaded_file.getvalue())
+                        tmp_path = tmp.name
+                    try:
+                        detected = auto_configure_bank_profile(tmp_path, model_id=profile.config_model)
+                        if detected:
+                            st.session_state["pending_profile"] = detected
+                            st.session_state["discovery_id"] = str(int(time.time()))
+                            status.update(label="Discovery Complete! Please review in 'General Settings'", state="complete", expanded=False)
+                        else:
+                            st.error("Discovery failed.")
+                    finally:
+                        if os.path.exists(tmp_path): os.remove(tmp_path)
+
+        if "pending_profile" in st.session_state:
+            pending = st.session_state["pending_profile"]
+            st.divider()
+            st.markdown("### 📋 AI Discovery Results")
+            st.info("AI has detected the following schema. Review and name your profile below.")
+            
+            # Make the profile name extremely evident
+            new_name = st.text_input("💎 **Give this Bank Profile a name**", value=pending.profile_name, help="E.g. My Main Bank, Revolut Business, etc.")
+            pending.profile_name = new_name
+            
+            st.code(f"Columns: {pending.column_mapping.date}, {pending.column_mapping.operation}, {pending.column_mapping.amount}\nFormat: {pending.date_format} | Skip rows: {pending.skip_rows}")
+            
+            if st.button("✅ Save & Apply This Configuration", type="primary", width='stretch'):
+                save_bank_profile(pending)
+                set_active_profile_name(pending.profile_name)
+                del st.session_state["pending_profile"]
+                st.success("Config saved and active!")
+                st.rerun()
+
+        # --- SECTION: STATUS ---
+        st.divider()
         if active_name:
-            st.markdown("### 📊 System Health")
+            st.subheader("📊 System Status")
             s1, s2, s3, s4 = st.columns(4)
             cat_size = 0
             if os.path.exists(MERCHANT_CATALOGUE):
@@ -105,9 +153,10 @@ def render_settings():
         else:
             st.info("Profiles help you manage multiple banks. Create your first one to see stats here.")
 
-        st.divider()
-        st.subheader("💾 Backup & Global Maintenance")
+        # --- SECTION: MAINTENANCE ---
         if active_name:
+            st.divider()
+            st.subheader("💾 Maintenance")
             col_res1, col_res2 = st.columns(2)
             with col_res1:
                 st.download_button(
@@ -115,7 +164,7 @@ def render_settings():
                     data=json.dumps(profile.model_dump(), indent=4, ensure_ascii=False),
                     file_name=f"bank_profile_{profile.profile_name}.json",
                     mime="application/json",
-                    use_container_width=True
+                    width='stretch'
                 )
             with col_res2:
                 if st.button("⚠️ Reset Active Profile", type="secondary", use_container_width=True):
@@ -123,44 +172,36 @@ def render_settings():
                     save_bank_profile(new_p)
                     st.toast("Profile reset!")
                     st.rerun()
+            
+            # --- NEW: RECOVERY BUTTON ---
+            if st.button("🚑 Deep Recovery (Retry Errors)", use_container_width=True, help="Retry processing all 'Uncategorized' or failed transactions."):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                def update_recovery_p(current, total):
+                    p = min(current / total, 1.0) if total > 0 else 1.0
+                    progress_bar.progress(p)
+                    status_text.write(f"**Recovery Progress:** {current}/{total} records")
+                
+                with st.spinner("Analyzing and fixing errors..."):
+                    import importlib
+                    import auto_bi.core.recovery
+                    importlib.reload(auto_bi.core.recovery)
+                    from auto_bi.core.recovery import run_error_recovery
+                    
+                    fixed, total = run_error_recovery(progress_callback=update_recovery_p)
+                    if fixed > 0:
+                        st.success(f"✨ Success! Recovered {fixed} / {total} transactions.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    elif total > 0:
+                        st.warning(f"Analyzed {total} errors but could not improve classification. Try adding a new rule!")
+                    else:
+                        st.info("No errors found to recover.")
+        else:
+            st.divider()
+            st.info("💡 Tip: Once you create a bank profile, maintenance and export tools will appear here.")
 
     with tab1:
-        st.subheader("🚀 Smart Ingestion Discovery")
-        st.write("Upload a sample file to automatically detect column mapping and data structure.")
-        
-        uploaded_file = st.file_uploader("Sample File (CSV/XLSX)", type=["xlsx", "xls", "csv"])
-        if uploaded_file:
-            if st.button("🔍 Run Auto-Discovery", type="primary", use_container_width=True):
-                with st.status("Analyzing file schema...", expanded=True) as status:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
-                        tmp.write(uploaded_file.getvalue())
-                        tmp_path = tmp.name
-                    try:
-                        detected = auto_configure_bank_profile(tmp_path, model_id=profile.config_model)
-                        if detected:
-                            st.session_state["pending_profile"] = detected
-                            st.session_state["discovery_id"] = str(int(time.time()))
-                            status.update(label="Discovery Complete! Please review in 'General Settings'", state="complete", expanded=False)
-                        else:
-                            st.error("Discovery failed.")
-                    finally:
-                        if os.path.exists(tmp_path): os.remove(tmp_path)
-
-        if "pending_profile" in st.session_state:
-            pending = st.session_state["pending_profile"]
-            st.divider()
-            st.markdown("### 📋 Findings")
-            st.info("Verify these suggestions before applying.")
-            st.code(f"Date: {pending.column_mapping.date} | Desc: {pending.column_mapping.operation} | Amount: {pending.column_mapping.amount}\nFormat: {pending.date_format} | Skip: {pending.skip_rows}")
-            
-            if st.button("✅ Apply This Configuration", type="primary", use_container_width=True):
-                save_bank_profile(pending)
-                set_active_profile_name(pending.profile_name)
-                del st.session_state["pending_profile"]
-                st.success("Config saved and active!")
-                st.rerun()
-
-    with tab2:
         if not active_name and not is_discovery_mode:
             st.warning("Please create or select a profile to view general settings.")
         else:
@@ -185,11 +226,11 @@ def render_settings():
                 c_out, c_inc = st.columns(2)
                 with c_out:
                     st.markdown("**Outgoing**")
-                    edf_out = st.data_editor([{"Category": c} for c in display_profile.outgoing_categories], num_rows="dynamic", use_container_width=True, key=f"edout_{key_suffix}")
+                    edf_out = st.data_editor([{"Category": c} for c in display_profile.outgoing_categories], num_rows="dynamic", width='stretch', key=f"edout_{key_suffix}")
                     display_profile.outgoing_categories = [r["Category"] for r in edf_out if r.get("Category")]
                 with c_inc:
                     st.markdown("**Incoming**")
-                    edf_inc = st.data_editor([{"Category": c} for c in display_profile.incoming_categories], num_rows="dynamic", use_container_width=True, key=f"edinc_{key_suffix}")
+                    edf_inc = st.data_editor([{"Category": c} for c in display_profile.incoming_categories], num_rows="dynamic", width='stretch', key=f"edinc_{key_suffix}")
                     display_profile.incoming_categories = [r["Category"] for r in edf_inc if r.get("Category")]
 
                 st.divider()
@@ -202,11 +243,12 @@ def render_settings():
                     pats = st.text_area("Cleanup Regex Patterns", value="\n".join(display_profile.cleaning_patterns), height=150)
                     display_profile.cleaning_patterns = [p.strip() for p in pats.split("\n") if p.strip()]
 
-            if st.button("💾 Save Settings", type="primary", use_container_width=True):
+            if st.button("💾 Save Settings", type="primary", width='stretch'):
                 if not display_profile.profile_name:
                     st.error("Profile name is required!")
                 else:
-                    save_bank_profile(display_profile)
+                    # Pass active_name as old_name to support renaming
+                    save_bank_profile(display_profile, old_name=active_name)
                     if is_discovery_mode:
                         set_active_profile_name(display_profile.profile_name)
                         del st.session_state["pending_profile"]
@@ -214,13 +256,13 @@ def render_settings():
                     time.sleep(0.5)
                     st.rerun()
 
-    with tab3:
+    with tab2:
         if not active_name:
             st.warning("Select a profile to access AI tools.")
         else:
             st.subheader("🧠 Intelligence & Memory")
             new_rule = st.text_input("New Business Rule (Natural Language)")
-            if st.button("✨ Train System", use_container_width=True):
+            if st.button("✨ Train System", width='stretch'):
                 if new_rule:
                     with st.spinner("Compiling..."):
                         compiled = interpret_user_rule(new_rule)
@@ -244,7 +286,8 @@ def render_settings():
             if show_advanced:
                 profile.config_model = st.text_input("Config Model", profile.config_model)
                 profile.classification_model = st.text_input("Classification Model", profile.classification_model)
-                if st.button("Sync Models", use_container_width=True):
+                profile.fast_model_id = st.text_input("Fast Model (Multi-Model)", profile.fast_model_id)
+                if st.button("Sync Models", width='stretch'):
                     save_bank_profile(profile)
                     st.toast("Syncing...")
             else:

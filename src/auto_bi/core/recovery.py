@@ -44,8 +44,12 @@ def run_error_recovery(progress_callback=None):
     logger.info("🚑 PHASE: ERROR RECOVERY & REPAIR")
     logger.info("=" * 40)
     
+    silver_data = []
     with open(SILVER_FILE, 'r', encoding='utf-8') as f:
-        silver_data = json.load(f)
+        for line in f:
+            try:
+                silver_data.append(json.loads(line))
+            except Exception: continue
     
     # Load Bronze data for retroactive repair
     bronze_map = {}
@@ -66,7 +70,7 @@ def run_error_recovery(progress_callback=None):
         
         if is_uncat or is_error:
             # RETROACTIVE REPAIR: Fill missing original data from Bronze
-            if not r.get("original_operation") or not r.get("reasoning"):
+            if not r.get("original_operation") or not r.get("reasoning") or "Extraction failed" in r.get("reasoning", ""):
                 b_item = bronze_map.get(str(r.get("id")))
                 if b_item:
                     op = b_item.get("operation", "")
@@ -74,8 +78,8 @@ def run_error_recovery(progress_callback=None):
                     r["original_operation"] = op
                     r["original_details"] = det
                     # If reasoning was empty, fill with raw info for visibility
-                    if not r.get("reasoning"):
-                        r["reasoning"] = f"{op} | {det}"
+                    if not r.get("reasoning") or "Extraction failed" in r.get("reasoning", ""):
+                        r["reasoning"] = f"Extraction failed. Raw data: {op} | {det}"
                     repair_count += 1
             
             to_retry_indices.append(i)
@@ -83,16 +87,20 @@ def run_error_recovery(progress_callback=None):
     if repair_count > 0:
         logger.info(f"🔧 Repaired {repair_count} older records with missing original context.")
 
+    def save_silver_jsonl(data):
+        with open(SILVER_FILE, 'w', encoding='utf-8') as f:
+            for entry in data:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     if not to_retry_indices:
         if repair_count > 0:
-            with open(SILVER_FILE, 'w', encoding='utf-8') as f:
-                json.dump(silver_data, f, indent=4, ensure_ascii=False)
+            save_silver_jsonl(silver_data)
         logger.info("✅ No errors found to recover.")
         return 0, 0
         
     logger.info(f"🧐 Found {len(to_retry_indices)} records to re-process.")
     
-    # FORCE RELOAD of extractor and prompts to bypass Streamlit stale cache
+    # FORCE RELOAD of extractor and prompts
     import importlib
     import auto_bi.core.extractor
     import auto_bi.utils.prompts
@@ -100,52 +108,85 @@ def run_error_recovery(progress_callback=None):
         importlib.reload(auto_bi.utils.prompts)
         importlib.reload(auto_bi.core.extractor)
         from auto_bi.core.extractor import TransactionParser
-        logger.info("🔄 Modules reloaded successfully to ensure latest signatures.")
+        logger.info("🔄 Modules reloaded successfully.")
     except Exception as e:
         logger.warning(f"Could not reload modules: {e}")
         from auto_bi.core.extractor import TransactionParser
 
-    batch_input = []
-    for idx in to_retry_indices:
-        r = silver_data[idx]
-        batch_input.append({
-            "text": f"{r.get('original_operation', '')} {r.get('original_details', '')}",
-            "direction": r.get("tipology", "Outgoing"),
-            "merchant": None, # Force re-extraction
-            "amount": abs(r.get("amount", 0.0)),
-            "original_operation": r.get("original_operation", ""),
-            "original_details": r.get("original_details", ""),
-            "id": r.get("id")
-        })
-        
     parser = TransactionParser()
-    
-    # Logic check: if system_template is still missing despite reload, fallback to standard call
-    import inspect
-    sig = inspect.signature(parser.classify_batch)
-    if 'system_template' in sig.parameters:
-        results = parser.classify_batch(batch_input, system_template=RECOVERY_CLASSIFICATION_TEMPLATE)
-    else:
-        logger.warning("⚠️ system_template parameter still missing in classify_batch signature. Calling without it.")
-        results = parser.classify_batch(batch_input)
-    
     recovered_count = 0
-    for i, res in enumerate(results):
-        if res.get("category") != "Uncategorized":
-            idx = to_retry_indices[i]
-            silver_data[idx].update({
-                "merchant": res['merchant'],
-                "category": res['category'],
-                "confidence": res.get('confidence', 0.5),
-                "reasoning": res.get('reasoning', ''),
-                "category_source": "recovery_inference"
-            })
-            recovered_count += 1
-            
-    with open(SILVER_FILE, 'w', encoding='utf-8') as f:
-        json.dump(silver_data, f, indent=4, ensure_ascii=False)
-        
-    duration = time.time() - start_time
-    logger.info(f"✨ Recovery complete: {recovered_count}/{len(to_retry_indices)} records fixed in {duration:.2f}s")
+    total_to_retry = len(to_retry_indices)
     
-    return recovered_count, len(to_retry_indices)
+    # Process in micro-batches of 3
+    RECOVERY_BATCH_SIZE = 3
+    for i in range(0, total_to_retry, RECOVERY_BATCH_SIZE):
+        batch_indices = to_retry_indices[i:i + RECOVERY_BATCH_SIZE]
+        batch_input = []
+        for idx in batch_indices:
+            r = silver_data[idx]
+            batch_input.append({
+                "text": f"{r.get('original_operation', '')} {r.get('original_details', '')}",
+                "direction": r.get("tipology", "Outgoing"),
+                "amount": abs(r.get("amount", 0.0)),
+                "original_operation": r.get("original_operation", ""),
+                "original_details": r.get("original_details", ""),
+                "id": r.get("id")
+            })
+        
+        logger.info(f"   🚑 [{min(i + RECOVERY_BATCH_SIZE, total_to_retry)}/{total_to_retry}] Recovering micro-batch...")
+        
+        try:
+            results = parser.classify_batch(batch_input, system_template=RECOVERY_CLASSIFICATION_TEMPLATE)
+            
+            for idx_in_batch, res in enumerate(results):
+                if res.get("category") != "Uncategorized":
+                    idx = batch_indices[idx_in_batch]
+                    silver_data[idx].update({
+                        "merchant": res['merchant'],
+                        "category": res['category'],
+                        "confidence": float(res.get('confidence', 0.85)),
+                        "reasoning": res.get('reasoning', ''),
+                        "category_source": "recovery_inference"
+                    })
+                    recovered_count += 1
+                    logger.info(f"      ✅ Fixed: {res['merchant']} -> {res['category']}")
+                else:
+                    # LAST RESORT: Try Bank Hint Mapping
+                    idx = batch_indices[idx_in_batch]
+                    r = silver_data[idx]
+                    b_item = bronze_map.get(str(r.get('id')))
+                    bank_hint = b_item.get('bank_category_hint') if b_item else None
+                    
+                    if bank_hint:
+                        logger.info(f"      🛡️ IA failed. Trying Bank Hint: '{bank_hint}'...")
+                        mapped = parser.map_bank_category(bank_hint, r.get("tipology", "Outgoing"))
+                        if mapped and mapped.get("category") != "Uncategorized":
+                            silver_data[idx].update({
+                                "merchant": mapped['merchant'],
+                                "category": mapped['category'],
+                                "confidence": -1.0,
+                                "reasoning": mapped['reasoning'],
+                                "category_source": mapped['category_source']
+                            })
+                            recovered_count += 1
+                            logger.info(f"      🛡️ Recovered by Bank Hint: {mapped['category']}")
+                        else:
+                            logger.info(f"      ❌ Still Uncategorized (IA + Bank Hint failed).")
+                    else:
+                        logger.info(f"      ❌ Still Uncategorized (No Bank Hint available).")
+        except Exception as e:
+            logger.error(f"      ⚠️ Failed to recover micro-batch: {e}")
+            
+        # Incremental Save (JSONL)
+        try:
+            save_silver_jsonl(silver_data)
+        except Exception as e:
+            logger.error(f"      ❌ Failed to save silver_data: {e}")
+
+        if progress_callback:
+            progress_callback(min(i + RECOVERY_BATCH_SIZE, total_to_retry), total_to_retry)
+            
+    duration = time.time() - start_time
+    logger.info(f"✨ Recovery complete: {recovered_count}/{total_to_retry} records fixed in {duration:.2f}s")
+    
+    return recovered_count, total_to_retry

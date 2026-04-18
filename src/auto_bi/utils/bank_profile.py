@@ -35,13 +35,14 @@ class BankProfile(BaseModel):
         r"ACQUISTO"
     ]
     rules_memory: List[str] = []
-    config_model: str = "llama3:8b"
-    classification_model: str = "gemma4-e4b-4bit"
+    config_model: str = "qwen3:8b"
+    classification_model: str = "qwen3:8b"
+    fast_model_id: str = "gemma4:e2b"
     merchant_aliases: Dict[str, str] = {}
     category_mapping: Dict[str, str] = {}
     outgoing_categories: List[str] = [
-        "Subscriptions", "Utilities", "Home", "Dining", "Shopping", 
-        "Health", "Transport", "Groceries", "Savings", "Gifts", "Financial", "Other"
+        "Subscriptions", "Utilities", "Home", "Dining & Entertainment", "Shopping", 
+        "Health & Sport", "Transport", "Groceries", "Savings & Investments", "Gifts", "Financial", "Other"
     ]
     incoming_categories: List[str] = ["Salary", "Refund", "Transfer", "Gift", "Other"]
 
@@ -98,14 +99,28 @@ def load_bank_profile(name: str = None) -> BankProfile:
         load_bank_profile.cache_clear()
     return profile
 
-def save_bank_profile(profile: BankProfile):
-    name = profile.profile_name or get_active_profile_name()
-    path = os.path.join(get_profiles_dir(), f"{name}.json")
+def save_bank_profile(profile: BankProfile, old_name: str = None):
+    new_name = profile.profile_name or get_active_profile_name()
+    
+    # Handle Rename: If an old name is provided and it differs from the new one, cleanup the old file
+    if old_name and old_name != new_name:
+        old_path = os.path.join(get_profiles_dir(), f"{old_name}.json")
+        if os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+                logger.info(f"Renaming profile: deleted old file {old_path}")
+                # If we were editing the active profile, point the system to the new name
+                if get_active_profile_name() == old_name:
+                    set_active_profile_name(new_name)
+            except Exception as e:
+                logger.error(f"Error removing old profile file during rename: {e}")
+
+    path = os.path.join(get_profiles_dir(), f"{new_name}.json")
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile.model_dump(), f, indent=4, ensure_ascii=False)
-            logger.info(f"Bank profile '{name}' saved to {path}")
+            logger.info(f"Bank profile '{new_name}' saved to {path}")
             # Clear cache to ensure next load gets updated version
             load_bank_profile.cache_clear()
     except Exception as e:
-        logger.error(f"Error saving bank profile '{name}': {e}")
+        logger.error(f"Error saving bank profile '{new_name}': {e}")

@@ -28,18 +28,21 @@ class GhostModelManager:
     def __init__(self, model_id: str):
         self.model_id = model_id
         self.pull_successful = False
+        self.was_already_present = False
 
     def __enter__(self):
-        logger.info(f"👻 Ghost Model Strategy: pulling {self.model_id}...")
+        logger.info(f"👻 Ghost Model Strategy: analyzing {self.model_id}...")
         try:
             # Check if already exists
             res = subprocess.run(["ollama", "list"], capture_output=True, text=True)
             if self.model_id in res.stdout:
-                logger.info(f"Model {self.model_id} already available.")
-                self.pull_successful = True
+                logger.info(f"Model {self.model_id} already available. Skipping pull and will PRESERVE it after use.")
+                self.was_already_present = True
+                self.pull_successful = True # Mark as successful to allow execution
                 return self
             
-            # Pull model
+            # Pull model (only if ghost)
+            logger.info(f"Model {self.model_id} not found. Pulling temporary ghost...")
             t0 = time.time()
             subprocess.run(["ollama", "pull", self.model_id], check=True)
             self.pull_successful = True
@@ -50,12 +53,19 @@ class GhostModelManager:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.pull_successful:
+        # We NEVER delete llama3:8b as it is now our primary persistent model
+        if self.model_id == "llama3:8b":
+            logger.info(f"✨ Ghost Model Strategy: preserving {self.model_id} as the primary application model.")
+            return
+
+        if self.pull_successful and not self.was_already_present:
             logger.info(f"🗑️ Ghost Model Strategy: removing {self.model_id} to save space...")
             try:
                 subprocess.run(["ollama", "rm", self.model_id], check=True)
             except Exception as e:
                 logger.warning(f"Failed to remove model {self.model_id}: {e}")
+        elif self.was_already_present:
+            logger.info(f"✨ Ghost Model Strategy: preserving {self.model_id} as it was already on system.")
 
 
 def detect_file_params(file_path: str) -> dict:

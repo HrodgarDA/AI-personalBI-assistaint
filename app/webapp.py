@@ -13,9 +13,14 @@ from common import apply_theme, load_data, DATA_PATH, restore_state_from_url, sy
 from dashboard import render_dashboard
 from data_editor import render_table
 from settings import render_settings
-from auto_bi.core.ingestion import ingest_tabular_data
+from auto_bi.core.ingestion import ingest_tabular_data, analyze_file_for_ui
 from auto_bi.core.process import run_processing, run_certify
 from auto_bi.utils.config import BRONZE_RAW
+
+@st.cache_data(show_spinner="Analyzing file...")
+def cached_analyze_file(uploaded_file):
+    """Cached wrapper for file analysis to prevent UI freezes."""
+    return analyze_file_for_ui(uploaded_file)
 
 
 def main():
@@ -52,6 +57,28 @@ def main():
     
     uploaded_file = st.sidebar.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
     
+    if uploaded_file is not None:
+        stats = cached_analyze_file(uploaded_file)
+        if "error" in stats:
+            st.sidebar.error(stats["error"])
+        else:
+            with st.sidebar.container(border=True):
+                st.markdown("##### 📊 File Analysis")
+                c1, c2 = st.columns(2)
+                c1.metric("Total Rows", stats["total_rows"])
+                c2.metric("New Rows", stats["new_rows"])
+                
+                # Format time
+                seconds = stats["estimated_seconds"]
+                if seconds >= 60:
+                    time_str = f"{int(seconds // 60)}m {int(seconds % 60)}s"
+                else:
+                    time_str = f"{int(seconds)}s"
+                
+                st.write(f"⏱️ **Estimated processing time:** {time_str}")
+                if stats["new_rows"] > 0:
+                    st.caption(f"Based on your recent speed: {stats['avg_speed']:.2f}s/tx")
+    
     col_ing, col_proc = st.sidebar.columns(2)
     
     if col_ing.button("Archive", width="stretch", help="Securely save uploaded file to the data archive"):
@@ -85,6 +112,7 @@ def main():
                 run_processing(progress_callback=update_p)
                 run_certify()
             st.success("Complete!")
+            st.info("💡 **Mac Tip:** If you have many transactions, run `caffeinate` in your terminal to prevent the Mac from sleeping during processing.")
             st.cache_data.clear() # IMPORTANT: Clear cache to see new data
             st.rerun()
 

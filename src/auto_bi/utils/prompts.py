@@ -56,6 +56,7 @@ BATCH_CLASSIFICATION_TEMPLATE = (
     "SYSTEM RULES:\n"
     "- Output ONLY a JSON object with a 'results' field containing the list of result objects.\n"
     "- Maintain the exact order of the input list.\n"
+    "{user_feedback_examples}\n"
     "{custom_user_rules}\n\n"
     "TRANSACTIONS TO PROCESS:\n"
     "{transactions_block}"
@@ -73,10 +74,27 @@ RECOVERY_CLASSIFICATION_TEMPLATE = (
     "2. Assign the best Category from the list.\n"
     "3. Provide brief reasoning explaining why this is the best match despite previous failure.\n\n"
     "STRICT USER PREFERENCES:\n"
+    "{user_feedback_examples}\n"
     "{custom_user_rules}\n\n"
     "SYSTEM RULES:\n"
     "- Output ONLY a JSON object with a 'results' field containing the list of result objects.\n"
     "- Maintain the exact order of the input list.\n"
     "FAILED TRANSACTIONS TO RE-PROCESS:\n"
     "{transactions_block}"
+)
+
+# --- BANK HINT MAPPING ---
+BANK_HINT_MAPPING_TEMPLATE = (
+    "You are a classification assistant. Your goal is to map a 'Bank Category' string "
+    "from a bank statement to one of the user's defined Global Categories.\n\n"
+    "AVAILABLE SYSTEM CATEGORIES:\n"
+    "{categories_block}\n\n"
+    "CONTEXT:\n"
+    "Transaction Direction: {direction}\n"
+    "Bank Category to Map: '{bank_hint}'\n\n"
+    "SYSTEM RULES:\n"
+    "1. Pick the best match from the list.\n"
+    "2. If no match is possible, use 'Uncategorized'.\n"
+    "3. Provide a brief reasoning for the translation.\n\n"
+    "Return JSON with 'category' and 'reasoning' fields."
 )

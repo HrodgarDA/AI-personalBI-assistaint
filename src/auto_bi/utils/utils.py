@@ -1,6 +1,33 @@
 import re
 import logging
 
+def levenshtein_ratio(s1: str, s2: str) -> float:
+    """Calculates the Levenshtein distance ratio between two strings (0.0 to 1.0)."""
+    if s1 == s2: return 1.0
+    if not s1 or not s2: return 0.0
+    
+    rows = len(s1) + 1
+    cols = len(s2) + 1
+    distance = [[0 for _ in range(cols)] for _ in range(rows)]
+
+    for i in range(1, rows):
+        distance[i][0] = i
+    for i in range(1, cols):
+        distance[0][i] = i
+
+    for col in range(1, cols):
+        for row in range(1, rows):
+            if s1[row-1] == s2[col-1]:
+                cost = 0
+            else:
+                cost = 1
+            distance[row][col] = min(distance[row-1][col] + 1,      # deletion
+                                 distance[row][col-1] + 1,      # insertion
+                                 distance[row-1][col-1] + cost) # substitution
+
+    max_len = max(len(s1), len(s2))
+    return (max_len - distance[row][col]) / max_len
+
 logger = logging.getLogger(__name__)
 
 # --- CONSTANTS ---

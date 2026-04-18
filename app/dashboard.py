@@ -50,8 +50,28 @@ def render_dashboard(data):
         col3.metric("Outgoing", f"€ {total_outgoing:,.2f}", delta_color="inverse")
         col4.metric("Top Category", top_cat)
 
+    # --- INTERACTIVE QUICK FILTERS ---
+    if cat_totals:
+        st.markdown("##### 🔍 Quick Filters")
+        # Get top 3 categories
+        sorted_cats = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)[:3]
+        q_cols = st.columns(len(sorted_cats) + 1)
+        
+        for i, (cat, total) in enumerate(sorted_cats):
+            if q_cols[i].button(f"Only {cat}", key=f"qf_{cat}", width="stretch", help=f"Filter by {cat}"):
+                st.session_state["cat_ms"] = [cat]
+                st.rerun()
+        
+        if q_cols[-1].button("❌ Clear", key="clear_qf", width="stretch"):
+            st.session_state["cat_ms"] = []
+            st.rerun()
+
     # Low Confidence Warning
-    low_conf_count = len([row for row in data if row.get("confidence", 1.0) < 0.7])
+    try:
+        low_conf_count = len([row for row in data if float(row.get("confidence", 1.0)) < 0.7])
+    except (ValueError, TypeError):
+        low_conf_count = 0
+        
     if low_conf_count > 0:
         st.warning(f"⚠️ **{low_conf_count} transactions** require your review (Confidence < 70%). Switch to the **Table** view and use the 'Needs Review' filter.")
 
