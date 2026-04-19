@@ -50,21 +50,6 @@ def render_dashboard(data):
         col3.metric("Outgoing", f"€ {total_outgoing:,.2f}", delta_color="inverse")
         col4.metric("Top Category", top_cat)
 
-    # --- INTERACTIVE QUICK FILTERS ---
-    if cat_totals:
-        st.markdown("##### 🔍 Quick Filters")
-        # Get top 3 categories
-        sorted_cats = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)[:3]
-        q_cols = st.columns(len(sorted_cats) + 1)
-        
-        for i, (cat, total) in enumerate(sorted_cats):
-            if q_cols[i].button(f"Only {cat}", key=f"qf_{cat}", width="stretch", help=f"Filter by {cat}"):
-                st.session_state["cat_ms"] = [cat]
-                st.rerun()
-        
-        if q_cols[-1].button("❌ Clear", key="clear_qf", width="stretch"):
-            st.session_state["cat_ms"] = []
-            st.rerun()
 
     # Low Confidence Warning
     try:
@@ -95,9 +80,32 @@ def render_dashboard(data):
             st.session_state["time_freq"] = "M"
             st.rerun()
 
-    st.markdown("<h3 style='text-align: center;'>Cumulative Salary vs Expenses</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center;'>Total Performance over Time</h3>", unsafe_allow_html=True)
+    
+    # Mode selector
+    if "chart_is_cumulative" not in st.session_state:
+        st.session_state["chart_is_cumulative"] = True
+
+    c_col1, c_col2 = st.columns([1, 1])
+    with c_col1:
+        if st.button("📈 Cumulative", width="stretch", type="primary" if st.session_state["chart_is_cumulative"] else "secondary"):
+            st.session_state["chart_is_cumulative"] = True
+            st.rerun()
+    with c_col2:
+        if st.button("📊 Periodical", width="stretch", type="primary" if not st.session_state["chart_is_cumulative"] else "secondary"):
+            st.session_state["chart_is_cumulative"] = False
+            st.rerun()
+
     with st.container(border=True):
-        st.plotly_chart(plot_amount_over_time(data, freq=st.session_state["time_freq"]), width="stretch", key="chart_over_time")
+        st.plotly_chart(
+            plot_amount_over_time(
+                data, 
+                freq=st.session_state["time_freq"], 
+                cumulative=st.session_state["chart_is_cumulative"]
+            ), 
+            width="stretch", 
+            key="chart_over_time"
+        )
 
     st.markdown(f"<h3 style='text-align: center;'>{chart_title_prefix} by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):

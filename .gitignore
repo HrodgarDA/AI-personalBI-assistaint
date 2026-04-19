@@ -18,7 +18,8 @@ credentials.json
 token.json
 
 # --- Data (Ignored to keep repo small/private) ---
-data/
+data/**/*
+data_backup_*/
 scratch/
 
 # --- Editor ---

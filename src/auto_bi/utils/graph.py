@@ -137,7 +137,7 @@ def plot_category_pie(data):
     return fig
 
 
-def plot_amount_over_time(data, freq="D"):
+def plot_amount_over_time(data, freq="D", cumulative=True):
     theme = get_theme()
     daily_incoming = defaultdict(float)
     daily_outgoing = defaultdict(float)
@@ -171,48 +171,60 @@ def plot_amount_over_time(data, freq="D"):
     else:
         x_labels = all_dates
 
-    # Build cumulative sums
-    cum_incoming = []
-    cum_outgoing = []
-    running_in = 0.0
-    running_out = 0.0
-    for d in all_dates:
-        running_in += float(daily_incoming.get(d, 0.0))
-        running_out += float(daily_outgoing.get(d, 0.0))
-        cum_incoming.append(running_in)
-        cum_outgoing.append(running_out)
+    # Build values
+    final_incoming = []
+    final_outgoing = []
+    
+    if cumulative:
+        running_in = 0.0
+        running_out = 0.0
+        for d in all_dates:
+            running_in += float(daily_incoming.get(d, 0.0))
+            running_out += float(daily_outgoing.get(d, 0.0))
+            final_incoming.append(running_in)
+            final_outgoing.append(running_out)
+        label_prefix = "Cumulative"
+        mode_suffix = " (Running Total)"
+    else:
+        for d in all_dates:
+            final_incoming.append(float(daily_incoming.get(d, 0.0)))
+            final_outgoing.append(float(daily_outgoing.get(d, 0.0)))
+        label_prefix = "Periodical"
+        mode_suffix = ""
 
     fig = go.Figure()
     
-    has_incoming = any(y > 0 for y in cum_incoming)
+    has_incoming = any(y > 0 for y in final_incoming)
     
     if has_incoming:
         fig.add_trace(go.Scatter(
             x=x_labels, 
-            y=cum_incoming, 
-            name="Cumulative Incoming",
+            y=final_incoming, 
+            name=f"{label_prefix} Incoming",
             mode="lines+markers", 
             line=dict(color=theme["palette"][1], width=3, shape='spline'),
             marker=dict(size=6, color=theme["palette"][1], line=dict(width=1, color=theme["bg_color"])),
             fill='tozeroy',
             fillcolor='rgba(52, 211, 153, 0.1)',
-            hovertemplate="<b>%{x}</b><br>Cumulative Incoming: %{y:.2f} €<extra></extra>"
+            hovertemplate=f"<b>%{{x}}</b><br>{label_prefix} Incoming: %{{y:.2f}} €{mode_suffix}<extra></extra>"
         ))
         
     fig.add_trace(go.Scatter(
         x=x_labels, 
-        y=cum_outgoing, 
-        name="Cumulative Outgoing",
+        y=final_outgoing, 
+        name=f"{label_prefix} Outgoing",
         mode="lines+markers", 
         line=dict(color=theme["palette"][3], width=3, shape='spline'),
         marker=dict(size=6, color=theme["palette"][3], line=dict(width=1, color=theme["bg_color"])),
         fill='tozeroy',
         fillcolor='rgba(248, 113, 113, 0.1)',
-        hovertemplate="<b>%{x}</b><br>Cumulative Outgoing: %{y:.2f} €<extra></extra>"
+        hovertemplate=f"<b>%{{x}}</b><br>{label_prefix} Outgoing: %{{y:.2f}} €{mode_suffix}<extra></extra>"
     ))
     
+    chart_title = "Cumulative Performance" if cumulative else "Periodical Performance"
     fig.update_layout(
-        _base_layout(theme, xaxis_title="Date", yaxis_title="Cumulative Amount (€)"),
+        _base_layout(theme, xaxis_title="Date", yaxis_title=f"{label_prefix} Amount (€)"),
+        title=dict(text=chart_title, x=0.5, y=0.95),
         hovermode="x unified"
     )
     return fig
