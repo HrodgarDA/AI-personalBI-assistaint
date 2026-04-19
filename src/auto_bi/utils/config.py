@@ -25,3 +25,12 @@ PERF_STATS = os.path.join(DATA_DIR, "perf_stats.json")
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# --- NORMALIZATION ---
+CATEGORY_NORMALIZATION_MAP = {
+    "Dining": "Dining & Entertainment",
+    "Health": "Health & Sport",
+    "Savings": "Savings & Investments",
+    "Home & Utilities": "Utilities",
+    "Refunds": "Refund"
+}
