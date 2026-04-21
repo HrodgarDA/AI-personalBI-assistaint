@@ -46,7 +46,6 @@ def _base_layout(theme: dict, xaxis_title=None, yaxis_title=None):
 
 CATEGORY_EMOJI = {
     "Dining": "🍽️",
-    "Financial": "🏦",
     "Gifts": "🎁",
     "Groceries": "🛒",
     "Health": "💊",

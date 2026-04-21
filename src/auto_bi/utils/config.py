@@ -22,6 +22,7 @@ MERCHANT_CATALOGUE = os.path.join(DATA_DIR, "merchant_catalogue.json")
 EXTRACTION_CACHE = os.path.join(DATA_DIR, "extraction_cache.json")
 BANK_CATEGORY_MAP = os.path.join(DATA_DIR, "bank_category_map.json")
 PERF_STATS = os.path.join(DATA_DIR, "perf_stats.json")
+SEARCH_USAGE_FILE = os.path.join(DATA_DIR, "search_usage.json")
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)

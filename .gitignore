@@ -25,9 +25,6 @@ scratch/
 # --- Editor ---
 .vscode/
 .idea/
-src/auto_bi/scripts/test_classification.py
-src/auto_bi/scripts/migrate_categories.py
 
 # --- Agents & Skills ---
-.agents/
 skills-lock.json

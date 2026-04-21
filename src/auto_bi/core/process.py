@@ -4,6 +4,7 @@ import logging
 import csv
 import time
 from typing import List, Dict, Set, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from auto_bi.core.extractor import TransactionParser
 from auto_bi.utils.config import (
@@ -157,15 +158,13 @@ def _group_by_signature(to_process: List[Dict]) -> Dict[Tuple, List[Dict]]:
     return groups
 
 
-def _resolve_signature_result(sig: Tuple, instances: List[Dict], parser: TransactionParser) -> Optional[Dict]:
+def _resolve_signature_result(sig: Tuple, instances: List[Dict], parser: TransactionParser, category_lookup: Dict[str, str]) -> Optional[Dict]:
     """Attempts to resolve a signature via fast-path or prepares it for LLM."""
     operation, details, bank_cat, amount = sig
     direction = _determine_direction(f"{operation} {details}", amount=amount)
     
     # 1. Fast Path Mapping from Bank Profile
-    mapping = getattr(parser.profile, 'category_mapping', {})
-    lookup = {k.lower().strip(): v for k, v in mapping.items()}
-    mapped_cat = lookup.get(bank_cat.lower().strip()) if bank_cat else None
+    mapped_cat = category_lookup.get(bank_cat.lower().strip()) if bank_cat else None
     
     if mapped_cat:
         return {
@@ -180,12 +179,45 @@ def _resolve_signature_result(sig: Tuple, instances: List[Dict], parser: Transac
             }
         }
     
-    # 2. Prepare for LLM
+    # 2. Extract Merchant for further checks
     custom_p = getattr(parser.profile, 'cleaning_patterns', [])
     aliases = getattr(parser.profile, 'merchant_aliases', {})
     merchant = extract_merchant_from_excel(operation, details, custom_patterns=custom_p, aliases=aliases)
     
-    text = f"Operation: {operation}\nDetails: {details}"
+    # 3. Fast Path: Merchant Catalogue Lookup
+    historical_cat = parser.cache.semantic_lookup(merchant, direction=direction)
+    if historical_cat:
+        return {
+            "is_fast": True,
+            "result": {
+                "category": historical_cat,
+                "merchant": merchant,
+                "confidence": 1.0,
+                "category_source": "from_catalogue",
+                "reasoning": "Matched directly with merchant catalogue.",
+                "duration": 0.01
+            }
+        }
+        
+    # 4. Fast Path: Deep Raw Scan in Catalogue
+    full_text = f"Operation: {operation}\nDetails: {details}"
+    deep_res = parser.cache.semantic_lookup_raw(full_text, direction=direction)
+    if deep_res:
+        cat, m_name = deep_res
+        return {
+            "is_fast": True,
+            "result": {
+                "category": cat,
+                "merchant": m_name,
+                "confidence": 1.0,
+                "category_source": "from_catalogue_deep",
+                "reasoning": f"Identified '{m_name}' in raw text via deep scan.",
+                "duration": 0.01
+            }
+        }
+
+    # 5. Prepare for LLM (No fast path found)
+    text = full_text
     if bank_cat: text += f"\nBank category: {bank_cat}"
     
     return {
@@ -195,7 +227,8 @@ def _resolve_signature_result(sig: Tuple, instances: List[Dict], parser: Transac
             "text": text,
             "direction": direction,
             "merchant": merchant,
-            "amount": amount
+            "amount": amount,
+            "bank_category": bank_cat
         }
     }
 
@@ -273,62 +306,108 @@ def run_processing(batch_size: int = 10, progress_callback=None):
     total_failed = 0
     all_stats = []
 
-    # 2. Block Processing
-    for i in range(0, len(unique_sigs), batch_size):
-        sig_batch = unique_sigs[i:i + batch_size]
-        results_map = {}
-        to_llm = []
+    # Pre-calculate category lookup map once
+    mapping = getattr(parser.profile, 'category_mapping', {})
+    category_lookup = {k.lower().strip(): v for k, v in mapping.items()}
+
+    # --- NEW PHASE: SUPER-POOLING & ROUTING ---
+    to_llm_sigs = [] # List of (sig, llm_input)
+    results_map = {}
+    
+    logger.info("📐 Analyzing signatures for optimal routing...")
+    for sig in unique_sigs:
+        res = _resolve_signature_result(sig, groups[sig], parser, category_lookup)
+        if res["is_fast"]:
+            results_map[sig] = res["result"]
+        else:
+            to_llm_sigs.append((sig, res["llm_input"]))
+            
+    if to_llm_sigs:
+        # Pre-search for all merchants to identify model pools and avoid model thrashing
+        merchants = sorted(list(set(x[1]["merchant"] for x in to_llm_sigs if x[1]["merchant"] != "Unknown")))
+        if merchants:
+            logger.info(f"   🔎 [WEB] Bulk searching info for {len(merchants)} unknown merchants...")
+            with ThreadPoolExecutor(max_workers=min(len(merchants), 10)) as executor:
+                search_results = list(executor.map(parser.search.search_merchant_info, merchants))
+                m_hints = dict(zip(merchants, search_results))
+            
+            for _, llm_in in to_llm_sigs:
+                hint = m_hints.get(llm_in["merchant"])
+                if hint:
+                    llm_in["hint"] = hint
+                    llm_in["category_source"] = "web_search"
+
+        # Split into Model Pools
+        fast_pool = [x for x in to_llm_sigs if x[1].get("hint")]
+        main_pool = [x for x in to_llm_sigs if not x[1].get("hint")]
         
-        # Prepare Block
-        for sig in sig_batch:
-            res = _resolve_signature_result(sig, groups[sig], parser)
-            if res["is_fast"]:
-                results_map[sig] = res["result"]
-            else:
-                to_llm.append(res["llm_input"])
+        for pool_name, sig_pool in [("FAST", fast_pool), ("MAIN", main_pool)]:
+            if not sig_pool: continue
+            logger.info(f"   🚀 Processing {pool_name} model pool ({len(sig_pool)} signatures)")
+            
+            for i in range(0, len(sig_pool), batch_size):
+                batch_subset = sig_pool[i : i + batch_size]
+                batch_inputs = []
+                for _, llm_in in batch_subset:
+                    # Prepare input for classify_batch (matching legacy structure)
+                    batch_inputs.append({
+                        "text": llm_in["text"],
+                        "direction": llm_in["direction"],
+                        "merchant": llm_in["merchant"],
+                        "amount": llm_in["amount"],
+                        "bank_category": llm_in["bank_category"],
+                        "hint": llm_in.get("hint"),
+                        "category_source": llm_in.get("category_source", "llm_inference")
+                    })
+                
+                batch_results = parser.classify_batch(batch_inputs)
+                for idx, res in enumerate(batch_results):
+                    results_map[batch_subset[idx][0]] = res
 
-        # Execute LLM Batch
-        if to_llm:
-            t0 = time.time()
-            batch_results = parser.classify_batch([{"text": x["text"], "direction": x["direction"], "merchant": x["merchant"], "amount": x["amount"]} for x in to_llm])
-            duration = (time.time() - t0) / len(to_llm)
-            for idx, res in enumerate(batch_results):
-                res["duration"] = duration
-                results_map[to_llm[idx]["sig"]] = res
+    # 3. Persistence & Mapping
+    logger.info("💾 Mapping results to instances and saving to Silver...")
+    for sig in unique_sigs:
+        res = results_map.get(sig)
+        if not res:
+            total_failed += 1
+            continue
+        
+        instances = groups[sig]
+        mode = _get_mode_string(res.get('category_source'))
+        logger.info(f"   {mode} {res['merchant']:<20} | {res['category']:<20} (x{len(instances)})")
+        
+        op, det, bank_cat, amt = sig
+        
+        # --- LEARNING MODE (ENRICHMENT) ---
+        if res.get('category_source') in ["llm_inference", "web_search", "from_catalogue_deep"]:
+            if res['merchant'] not in ["Unknown", "Mapped"]:
+                text_key = f"Operation: {op}\nDetails: {det}".lower().strip()
+                if bank_cat: text_key += f"\nBank category: {bank_cat}".lower().strip()
+                
+                if text_key not in parser.cache.extraction_cache:
+                    parser.cache.extraction_cache[text_key] = res['merchant']
+        
+        direction = _determine_direction(f"{op} {det}", amount=amt)
+        final_amt = -abs(amt) if direction == "Outgoing" else abs(amt)
 
-        # Persistence & Mapping
         new_entries = []
-        for sig in sig_batch:
-            res = results_map.get(sig)
-            if not res:
-                total_failed += 1
-                continue
-            
-            instances = groups[sig]
-            mode = _get_mode_string(res.get('category_source'))
-            logger.info(f"   {mode} {res['merchant']:<20} | {res['category']:<20} (x{len(instances)})")
-            
-            op, det, bank_cat, amt = sig
-            direction = _determine_direction(f"{op} {det}", amount=amt)
-            final_amt = -abs(amt) if direction == "Outgoing" else abs(amt)
-
-            for inst in instances:
-                entry = {
-                    "id": inst["id"], "date": inst.get("date", ""), "time": inst.get("time", "00:00"),
-                    "tipology": direction, "merchant": res['merchant'], "category": res['category'],
-                    "amount": final_amt, "original_operation": op, "original_details": det,
-                    "source": "tabular", "category_source": res.get('category_source', 'llm_inference'),
-                    "confidence": res.get('confidence', 0.0), "reasoning": res.get('reasoning', ''),
-                }
-                new_entries.append(entry)
-                all_stats.append({"id": inst["id"], "merchant": res["merchant"], "duration": res.get("duration", 0), "mode": mode})
+        for inst in instances:
+            entry = {
+                "id": inst["id"], "date": inst.get("date", ""), "time": inst.get("time", "00:00"),
+                "tipology": direction, "merchant": res['merchant'], "category": res['category'],
+                "amount": final_amt, "original_operation": op, "original_details": det,
+                "source": "tabular", "category_source": res.get('category_source', 'llm_inference'),
+                "confidence": res.get('confidence', 0.0), "reasoning": res.get('reasoning', ''),
+            }
+            new_entries.append(entry)
+            all_stats.append({"id": inst["id"], "merchant": res["merchant"], "duration": res.get("duration", 0), "mode": mode})
 
         if new_entries:
             save_to_silver(new_entries)
-            parser.save_caches()
             total_processed += len(new_entries)
             if progress_callback: progress_callback(total_processed, total_tx)
 
+    parser.save_caches()
     _print_recap(time.time() - start_time, all_stats, total_failed)
 
 

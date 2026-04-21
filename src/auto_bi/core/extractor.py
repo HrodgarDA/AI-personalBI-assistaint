@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from typing import Any, Optional, Dict, List
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -126,37 +127,58 @@ class TransactionParser:
         merchant = tx.get('merchant')
         if not merchant:
             merchant = self.cache.extraction_cache.get(cache_key) or self.cache.fuzzy_extract_lookup(text)
+            if merchant:
+                logger.info(f"💾 [CACHE] Resolved merchant '{merchant}' from extraction memory.")
         
         tx['merchant'] = merchant or "Unknown"
         tx['historical_category'] = None
         tx['category_source'] = "llm_inference"
         
-        # 2. Lookup in catalogue (with semantic fallback)
         if tx['merchant'] != "Unknown":
-            tx['historical_category'] = self.cache.semantic_lookup(tx['merchant'])
+            logger.info(f"🔍 [EXTRACT] Identifying category for merchant: '{tx['merchant']}'")
+            
+        # 2. Lookup in catalogue (Standard)
+        if tx['merchant'] != "Unknown":
+            tx['historical_category'] = self.cache.semantic_lookup(tx['merchant'], direction=tx['direction'])
             if tx['historical_category']:
                 tx['category_source'] = "from_catalogue"
+                return tx
+        
+        # 3. Deep Research Fallback (Raw Text Scan)
+        # If the extracted merchant failed, we scan the RAW text for ANY known catalogue entry
+        logger.info(f"🔎 [CATALOG] No direct match for '{tx['merchant']}'. Starting deep raw scan...")
+        deep_res = self.cache.semantic_lookup_raw(text, direction=tx['direction'])
+        if deep_res:
+            cat, m_name = deep_res
+            tx['historical_category'] = cat
+            tx['merchant'] = m_name
+            tx['category_source'] = "from_catalogue_deep"
+            
         return tx
 
     def classify_batch(self, transactions: List[Dict], system_template: str = None) -> List[Dict]:
-        """Main batch processing entry point for high performance."""
+        """Main batch processing entry point for high performance with parallel execution."""
         # 1. Pre-resolve against caches
         prepared = [self._prepare_tx(tx.copy()) for tx in transactions]
         results = [None] * len(transactions)
         
         # 2. Parallel Web Search for unknown merchants
-        to_search = [tx for tx in prepared if not tx['historical_category'] and tx['merchant'] != "Unknown"]
+        to_search = [tx for tx in prepared if not tx['historical_category'] and tx['merchant'] != "Unknown" and not tx.get('hint')]
         if to_search:
             merchants = list(set(tx['merchant'] for tx in to_search))
             logger.info(f"   🔎 [WEB] Searching info for {len(merchants)} merchants in parallel...")
-            m_hints = {m: self.search.search_merchant_info(m) for m in merchants}
+            
+            with ThreadPoolExecutor(max_workers=min(len(merchants), 5)) as executor:
+                results_list = list(executor.map(self.search.search_merchant_info, merchants))
+                m_hints = dict(zip(merchants, results_list))
+            
             for tx in to_search:
                 tx['hint'] = m_hints.get(tx['merchant'])
                 if tx.get('hint'): tx['category_source'] = "web_search"
             logger.info(f"   ✅ [WEB] Search hints retrieved.")
 
         # 3. Separate Bypass vs LLM
-        to_llm = [] # List of (original_index, tx)
+        to_llm_indices = [] # Indices in 'prepared' that need LLM
         for i, tx in enumerate(prepared):
             if tx['historical_category'] and tx.get('amount') is not None:
                 results[i] = {
@@ -165,70 +187,63 @@ class TransactionParser:
                     "amount": tx['amount'],
                     "confidence": 1.0,
                     "reasoning": "Determined from merchant catalogue (Bypass).",
-                    "category_source": "from_catalogue"
+                    "category_source": tx.get('category_source', 'from_catalogue')
                 }
             else:
-                to_llm.append((i, tx))
+                to_llm_indices.append(i)
 
-        if not to_llm: return results
+        if not to_llm_indices: return results
 
-        # 4. Process Batch by Direction
-        for direction in ["Outgoing", "Incoming"]:
-            tx_group = [(i, tx) for i, tx in to_llm if tx['direction'] == direction]
-            if not tx_group: continue
+        # 4. Execute LLM Calls in Parallel (Incoming vs Outgoing)
+        def _process_direction(direction: str):
+            dir_tx_indices = [idx for idx in to_llm_indices if prepared[idx]['direction'] == direction]
+            if not dir_tx_indices: return []
             
-            indices = [x[0] for x in tx_group]
-            tx_data = [x[1] for x in tx_group]
-            
-            # Build Prompt
+            tx_data = [prepared[idx] for idx in dir_tx_indices]
             feedback = self._build_feedback_context(limit=5)
             system_prompt = self.classifier.get_system_prompt(direction, feedback)
             
             tx_strings = []
             for tx in tx_data:
                 s = f"Text: {tx['text']}"
-                if tx['merchant'] != "Unknown": s += f" | Merchant Hint: {tx['merchant']}"
-                if tx.get('hint'): s += f" | Web Context: {tx['hint']}"
+                if tx.get('amount') is not None:
+                    s += f" | Amount: {abs(tx['amount']):.2f}"
+                if tx.get('bank_category'):
+                    s += f" | Bank Suggestion: {tx['bank_category']}"
+                if tx['merchant'] != "Unknown": 
+                    s += f" | Merchant Hint: {tx['merchant']}"
+                if tx.get('hint'): 
+                    s += f" | Web Context: {tx['hint']}"
                 tx_strings.append(s)
             
-            tx_block = "\n".join([f"{idx+1}. {txt}" for idx, txt in enumerate(tx_strings)])
-            template = system_template if system_template else BATCH_CLASSIFICATION_TEMPLATE
-            prompt = template.format(
-                categories_block="", # Handled by get_system_prompt internally or via manual replacement
-                user_feedback_examples="", # Handled by get_system_prompt 
-                custom_user_rules="", # Handled by get_system_prompt
-                transactions_block=tx_block
-            )
-            # Re-apply full prompt logic if needed (or refactor template logic)
-            # For now, we'll use the classifier's full system prompt
-            full_prompt = system_prompt + "\n\n" + BATCH_CLASSIFICATION_TEMPLATE.format(
+            user_prompt = BATCH_CLASSIFICATION_TEMPLATE.format(
                 categories_block="[SEE SYSTEM MESSAGE]",
                 user_feedback_examples="[SEE SYSTEM MESSAGE]",
                 custom_user_rules="[SEE SYSTEM MESSAGE]",
-                transactions_block=tx_block
+                transactions_block="\n".join([f"{idx+1}. {txt}" for idx, txt in enumerate(tx_strings)])
             )
-
-            # Execution
+            
             use_fast = any(tx.get('hint') for tx in tx_data)
             try:
                 logger.info(f"   🤖 [IA]  Processing block ({direction})...")
-                # Note: Classifier.execute_batch expects the prompt to be just the transactions block 
-                # or a formatted template. Let's adjust to be robust.
-                batch_res = self.classifier.execute_batch(full_prompt, direction, use_fast=use_fast)
+                batch_res = self.classifier.execute_batch(system_prompt, user_prompt, direction, use_fast=use_fast)
                 
+                res_list = []
                 for idx_in_batch, res in enumerate(batch_res.results):
-                    if idx_in_batch < len(indices):
-                        orig_idx = indices[idx_in_batch]
-                        tx = tx_data[idx_in_batch]
-                        
-                        # Cache updates
-                        self.cache.extraction_cache[tx['text'].lower().strip()] = res.merchant
-                        if res.merchant and res.merchant.lower() != "unknown" and is_valid_search_query(res.merchant):
-                            m_key = res.merchant.strip().lower()
-                            if tx['category_source'] != "from_catalogue":
-                                self.cache.merchant_cache[m_key] = res.category.value
-                        
-                        results[orig_idx] = {
+                    tx = tx_data[idx_in_batch]
+                    # Cache updates
+                    self.cache.extraction_cache[tx['text'].lower().strip()] = res.merchant
+                    if res.merchant and res.merchant.lower() != "unknown" and is_valid_search_query(res.merchant):
+                        m_key = res.merchant.strip().lower()
+                        if tx['category_source'] != "from_catalogue":
+                            # Store in directional format
+                            if m_key not in self.cache.merchant_cache or not isinstance(self.cache.merchant_cache[m_key], dict):
+                                self.cache.merchant_cache[m_key] = {}
+                            self.cache.merchant_cache[m_key][tx['direction']] = res.category.value
+                    
+                    res_list.append({
+                        "original_index": dir_tx_indices[idx_in_batch],
+                        "result": {
                             "category": res.category.value,
                             "merchant": res.merchant,
                             "amount": getattr(res, 'amount', tx.get('amount')),
@@ -236,8 +251,32 @@ class TransactionParser:
                             "reasoning": res.reasoning,
                             "category_source": tx['category_source']
                         }
+                    })
+                return res_list
             except Exception as e:
-                logger.error(f"   ❌ [IA] Batch processing error: {e}")
+                logger.error(f"   ❌ [IA] Batch processing error ({direction}): {e}")
+                return []
+
+        # Concurrent execution of directions
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(_process_direction, d) for d in ["Outgoing", "Incoming"]]
+            for future in futures:
+                for item in future.result():
+                    results[item["original_index"]] = item["result"]
+
+        # Final Fallback
+        for i in range(len(results)):
+            if results[i] is None:
+                prepared_tx = prepared[i]
+                results[i] = {
+                    "category": "Uncategorized", 
+                    "merchant": "Error", 
+                    "amount": prepared_tx.get('amount', 0.0), 
+                    "confidence": 0, 
+                    "category_source": "error",
+                    "reasoning": "Extraction failed due to system error."
+                }
+        return results
 
         # Final Fallback
         for i in range(len(results)):

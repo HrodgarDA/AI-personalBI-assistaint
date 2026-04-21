@@ -1,0 +1,22 @@
+ai-engineer: Costruisco LLM apps e RAG.
+ai-engineering-toolkit: Prompt eval, RAG design, security audit.
+api-security-best-practices: API sicure, auth, rate limit.
+caveman: Parlo poco. No fronzoli. Solo risultati.
+code-documentation-code-explain: Spiego codice difficile.
+code-refactoring-refactor-clean: Pulisco codice. SOLID.
+data-storytelling: Trasformo dati in storie.
+docker-expert: Container, ottimizzazione, security.
+documentation-generation-doc-generate: Genero documenti da codice.
+e2e-testing-patterns: Test e2e affidabili.
+kpi-dashboard-design: Dashboard per decisioni business.
+mlops-engineer: Pipeline ML, tracking, registry.
+performance-optimizer: Fix colli di bottiglia.
+product-manager-toolkit: Discovery e delivery prodotto.
+sql-optimization-patterns: SQL veloce. Indexing.
+supabase-automation: Automazione DB e Edge Functions.
+test-driven-development: Scrivo test prima di codice.
+using-superpowers: Protocollo uso skills.
+vercel-deployment: Deploy su Vercel.
+
+
+Utilizzando using-superpowers e 

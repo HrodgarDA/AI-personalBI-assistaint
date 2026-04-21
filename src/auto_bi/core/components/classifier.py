@@ -78,17 +78,22 @@ class Classifier:
         
         return system_prompt
 
-    def execute_batch(self, prompt: str, direction: str, use_fast: bool = False) -> Any:
-        """Executes a batch classification call."""
+    def execute_batch(self, system_prompt: str, user_prompt: str, direction: str, use_fast: bool = False) -> Any:
+        """Executes a batch classification call with separated system and user prompts."""
         model_name = self.profile.fast_model_id if use_fast else self.model_id
         batch_model = self.outgoing_batch_model if direction == "Outgoing" else self.incoming_batch_model
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
         
         try:
             return self.client.chat.completions.create(
                 model=model_name,
                 temperature=0.0,
                 response_model=batch_model,
-                messages=[{"role": "system", "content": prompt}],
+                messages=messages,
                 timeout=LLM_TIMEOUT * 2
             )
         except Exception as e:
@@ -98,7 +103,7 @@ class Classifier:
                     model=self.model_id,
                     temperature=0.0,
                     response_model=batch_model,
-                    messages=[{"role": "system", "content": prompt}],
+                    messages=messages,
                     timeout=LLM_TIMEOUT * 2
                 )
             raise e

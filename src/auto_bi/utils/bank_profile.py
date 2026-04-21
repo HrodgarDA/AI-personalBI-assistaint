@@ -42,7 +42,7 @@ class BankProfile(BaseModel):
     category_mapping: Dict[str, str] = {}
     outgoing_categories: List[str] = [
         "Subscriptions", "Utilities", "Home", "Dining & Entertainment", "Shopping", 
-        "Health & Sport", "Transport", "Groceries", "Savings & Investments", "Gifts", "Financial", "Other"
+        "Health & Sport", "Transport", "Groceries", "Savings & Investments", "Gifts", "Other"
     ]
     incoming_categories: List[str] = ["Salary", "Refund", "Transfer", "Gift", "Other"]
 

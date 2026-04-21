@@ -4,7 +4,11 @@ import logging
 import time
 import pandas as pd
 import hashlib
+import warnings
 from datetime import datetime
+
+# Silence openpyxl warnings regarding print areas (non-critical)
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 from auto_bi.utils.config import BRONZE_RAW, PERF_STATS, SILVER_FILE, DELETED_IDS_FILE
 from auto_bi.utils.bank_profile import load_bank_profile
 
@@ -79,6 +83,7 @@ def ingest_tabular_data(uploaded_file, progress_callback=None):
     new_records = []
     existing_bronze_ids = get_already_processed_ids(BRONZE_RAW)
     
+    local_occ_tracker = {} # signature -> count in current file
     total_df = len(df)
     for idx, row in df.iterrows():
         if progress_callback:
@@ -106,22 +111,18 @@ def ingest_tabular_data(uploaded_file, progress_callback=None):
             logger.warning(f"Could not parse amount '{row[mapping.amount]}' at row {idx}")
             amount = 0.0
         
-        # Stable ID: Hash based on content only. 
-        # To handle identical transactions on the same day, we use an occurrence counter.
+        # Stable ID: Hash based on content + occurrence index in THIS CURRENT FILE.
+        # This ensures that re-uploading the same file generates identical IDs.
         signature = f"{date_str}_{operation}_{amount}_{details}"
-        occ_count = 0
-        while True:
-            hash_string = f"{signature}_{occ_count}".encode('utf-8')
-            pseudo_id = hashlib.md5(hash_string).hexdigest()
-            if pseudo_id not in existing_bronze_ids:
-                break
-            # If the ID exists in Bronze, it might be a legitimately identical transaction 
-            # OR a duplicate from a previous file. We increment occ_count to find the 
-            # first "available" slot for this signature.
-            occ_count += 1
-            
-        # Optimization: We check if we have already "added" this ID in this current loop
-        # (This is handled by existing_bronze_ids.add(pseudo_id) at the end of the loop)
+        occ_count = local_occ_tracker.get(signature, 0)
+        local_occ_tracker[signature] = occ_count + 1
+        
+        hash_string = f"{signature}_{occ_count}".encode('utf-8')
+        pseudo_id = hashlib.md5(hash_string).hexdigest()
+        
+        # Skip if already in Bronze layer (Deduplication)
+        if pseudo_id in existing_bronze_ids:
+            continue
             
         # Find the category hint
         bank_category = ""
@@ -179,9 +180,10 @@ def analyze_file_for_ui(uploaded_file):
         df = df.dropna(subset=[mapping.date, mapping.operation, mapping.amount])
         total_rows = len(df)
         
-        # 2. Identify new rows (relative to Silver layer and Blacklist)
-        # This tells us how many rows will actually trigger LLM processing
-        existing_silver_ids = get_already_processed_ids(SILVER_FILE)
+        # 2. Identify new rows (relative to Silver layer, Bronze layer and Blacklist)
+        # We check both layers to see if the transaction is already "in the system"
+        existing_ids = get_already_processed_ids(SILVER_FILE)
+        existing_ids.update(get_already_processed_ids(BRONZE_RAW))
         
         # Also respect deleted IDs (Blacklist) if the file exists
         deleted_ids_set = set()
@@ -192,6 +194,7 @@ def analyze_file_for_ui(uploaded_file):
             except Exception: pass
 
         new_to_process_count = 0
+        local_occ_tracker = {} # signature -> count in current file
         
         for idx, row in df.iterrows():
             raw_date = row[mapping.date]
@@ -205,32 +208,23 @@ def analyze_file_for_ui(uploaded_file):
             amount = 0.0
             try:
                 amount = float(row[mapping.amount])
+                if getattr(profile, 'invert_signs', False):
+                    amount = -amount
             except (ValueError, TypeError): pass
             
-            # Recreate the exact same ID logic as in ingestion/process
+            details = str(row[mapping.details]) if mapping.details in df.columns and pd.notna(row[mapping.details]) else ""
+            
+            # Recreate the exact same ID logic as in ingestion/process (Deterministic)
             signature = f"{date_str}_{operation}_{amount}_{details}"
-            occ_count = 0
-            while True:
-                hash_string = f"{signature}_{occ_count}".encode('utf-8')
-                pseudo_id = hashlib.md5(hash_string).hexdigest()
-                
-                # If this ID is not in Silver AND not in Blacklist, it *could* be a candidate
-                # BUT we must also check if we've already "seen" this occurrence in the current file analysis
-                # to avoid double counting identical rows in the same uploaded file
-                if pseudo_id not in existing_silver_ids and pseudo_id not in deleted_ids_set:
-                    # Found a new slot
-                    new_to_process_count += 1
-                    # Mark it as "seen" for this analysis pass to avoid infinite loop or miscounts
-                    existing_silver_ids.add(pseudo_id)
-                    break
-                
-                # If pseudo_id IS in silver or blacklist, it means this occurrence is already known.
-                # However, there might be TWO identical transactions and only ONE is in silver.
-                # So we must check the NEXT occurrence.
-                occ_count += 1
-                
-                # Safety break to avoid infinite loops if something goes wrong
-                if occ_count > 100: break
+            occ_count = local_occ_tracker.get(signature, 0)
+            local_occ_tracker[signature] = occ_count + 1
+            
+            hash_string = f"{signature}_{occ_count}".encode('utf-8')
+            pseudo_id = hashlib.md5(hash_string).hexdigest()
+            
+            # If this ID is not in Silver, not in Bronze, AND not in Blacklist, it is truly new
+            if pseudo_id not in existing_ids and pseudo_id not in deleted_ids_set:
+                new_to_process_count += 1
                 
         # 3. Get speed and calculate time
         avg_speed = 2.0 # Default fallback

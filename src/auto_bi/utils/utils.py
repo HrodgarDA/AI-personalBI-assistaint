@@ -69,7 +69,20 @@ def clean_merchant_name(name: str, custom_patterns: list = None, aliases: dict =
         if clean.lower() in lookup:
             return lookup[clean.lower()]
 
-    # 1. Apply custom patterns if provided
+    # 1. Strip Gateway/Payment Prefixes (PayPal, SumUp, etc.)
+    # We do this early so manual aliases can match the "Inner Merchant"
+    prefixes = [
+        r'^PAYPAL\s*\*?\s*',
+        r'^SUMUP\s*\*?\s*',
+        r'^SUM\s*\*?\s*',
+        r'^IZ\s*\*?\s*',
+        r'^AMZN\s*MKTP\s*\*?\s*',
+        r'^GOOGLE\s*\*?\s*',
+    ]
+    for p in prefixes:
+        clean = re.sub(p, '', clean, flags=re.IGNORECASE)
+
+    # 2. Apply custom patterns if provided
     if custom_patterns:
         for pattern in custom_patterns:
             try:
@@ -77,7 +90,7 @@ def clean_merchant_name(name: str, custom_patterns: list = None, aliases: dict =
             except Exception as e:
                 logger.warning(f"Invalid custom regex '{pattern}': {e}")
                 
-    # 2. Remove trailing date patterns like "08/041312" or "VIA 28/"
+    # 3. Remove trailing date patterns like "08/041312" or "VIA 28/"
     clean = re.sub(r'\s+\d{2}/\d{2,}.*$', '', clean)
     # 3. Remove trailing numbers
     clean = re.sub(r'\s+\d+$', '', clean)
@@ -186,6 +199,10 @@ def normalize_merchant_name(name: str) -> str:
     noise_patterns = [
         r'^paypal\s*\*?\s*',
         r'^sumup\s*\*?\s*',
+        r'^sum\s*\*?\s*',
+        r'^iz\s*\*?\s*',
+        r'^amzn\s*mktp\s*\*?\s*',
+        r'^google\s*\*?\s*',
         r'^pagamento\s+(?:su\s+)?pos\s*',
         r'^pos\s+',
         r'^storno\s+',
@@ -197,8 +214,8 @@ def normalize_merchant_name(name: str) -> str:
     # 3. Remove dates (DD/MM or DD/MM/YYYY)
     clean = re.sub(r'\d{2}/\d{2}(?:\d{4})?\b', ' ', clean)
     
-    # 4. Remove all remaining numbers
-    clean = re.sub(r'\d+', ' ', clean)
+    # 4. Remove all remaining codes/numbers that look like IDs
+    clean = re.sub(r'\b\d{5,}\b', ' ', clean) # Numbers with 5+ digits
     
     # 5. Remove special characters (except spaces)
     clean = re.sub(r'[^\w\s]', ' ', clean)

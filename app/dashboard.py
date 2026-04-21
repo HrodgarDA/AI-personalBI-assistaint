@@ -5,15 +5,32 @@ from auto_bi.utils.graph import plot_amount_over_time, plot_category_pie, plot_c
 def render_dashboard(data):
     st.markdown("<h2 style='text-align: center;'>📈 Dashboard</h2>", unsafe_allow_html=True)
     
-    # Separate Outgoing and Incoming (with backward compatibility)
-    outgoing = [abs(row.get("amount", 0)) for row in data if row.get("tipology") in ["Outgoing", "Expense"]]
-    incoming = [abs(row.get("amount", 0)) for row in data if row.get("tipology") in ["Incoming", "Salary", "Refund"]]
+    # Financial Configuration
+    SAVINGS_CAT = "Savings & Investments"
+    REFUND_CAT = "Refund"
+
+    # Group records by category and tipology
+    incoming_records = [r for r in data if r.get("tipology") == "Incoming"]
+    outgoing_records = [r for r in data if r.get("tipology") == "Outgoing"]
+
+    # --- 1. SAVINGS LOGIC (Netting deposits and withdrawals) ---
+    deposits_to_savings = sum(abs(r.get("amount", 0)) for r in outgoing_records if r.get("category") == SAVINGS_CAT)
+    withdrawals_from_savings = sum(abs(r.get("amount", 0)) for r in incoming_records if r.get("category") == SAVINGS_CAT)
+    net_savings_val = deposits_to_savings - withdrawals_from_savings
+
+    # --- 2. PURE INCOME: Total incoming excluding internal transfers from savings ---
+    real_income_val = sum(abs(r.get("amount", 0)) for r in incoming_records if r.get("category") not in [SAVINGS_CAT, REFUND_CAT])
     
-    total_outgoing = sum(outgoing)
-    total_incoming = sum(incoming)
+    # --- 3. REAL EXPENSES: Total outgoing (non-investment) minus Refunds ---
+    gross_expenses_val = sum(abs(r.get("amount", 0)) for r in outgoing_records if r.get("category") != SAVINGS_CAT)
+    refunds_val = sum(abs(r.get("amount", 0)) for r in incoming_records if r.get("category") == REFUND_CAT)
+    real_expenses_val = gross_expenses_val - refunds_val
+
+    # --- 4. NET BALANCE ---
+    total_balance = sum(r.get("amount", 0) for r in data)
     num_tx = len(data)
-    
-    # Determine the context of the view (Expenses, Income, or Both)
+
+    # Determine context for charts
     active_tips = {row.get("tipology", row.get("direction")) for row in data}
     is_mostly_income = all(t in ["Incoming", "Salary", "Refund"] for t in active_tips) if active_tips else False
     is_mostly_expense = all(t in ["Outgoing", "Expense"] for t in active_tips) if active_tips else False
@@ -25,29 +42,36 @@ def render_dashboard(data):
     else:
         chart_title_prefix = "Transactions"
 
+    # Top Category calculation (excluding internal movements)
     cat_totals = defaultdict(float)
     for row in data:
         amount = row.get("amount")
         cat = row.get("category")
-        if cat and isinstance(amount, (int, float)):
+        if cat and cat not in [SAVINGS_CAT, REFUND_CAT] and isinstance(amount, (int, float)):
              cat_totals[cat] += abs(amount)
     
     top_cat = max(cat_totals.items(), key=lambda x: x[1])[0] if cat_totals else "N/A"
 
     # Net Balance Widget
-    balance = total_incoming - total_outgoing
     st.markdown(f"""
-        <div style='background-color: #1F2937; padding: 6px 15px; border-radius: 12px; border: 1px solid #374151; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; gap: 20px;'>
-            <span style='margin: 0; font-size: 0.8rem; color: #9CA3AF; text-transform: uppercase; font-weight: 600;'>Net Balance</span>
-            <span style='margin: 0; color: {"#10B981" if balance >=0 else "#EF4444"}; font-size: 1.6rem; font-weight: bold;'>€ {balance:,.2f}</span>
+        <div style='background-color: #1F2937; padding: 6px 15px; border-radius: 12px; border: 1px solid #374151; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-around; gap: 20px;'>
+            <div style='text-align: center;'>
+                <span style='margin: 0; font-size: 0.7rem; color: #9CA3AF; text-transform: uppercase; font-weight: 600;'>Net Balance</span><br>
+                <span style='margin: 0; color: {"#10B981" if total_balance >=0 else "#EF4444"}; font-size: 1.5rem; font-weight: bold;'>€ {total_balance:,.2f}</span>
+            </div>
+            <div style='width: 1px; height: 40px; background-color: #374151;'></div>
+            <div style='text-align: center;'>
+                <span style='margin: 0; font-size: 0.7rem; color: #9CA3AF; text-transform: uppercase; font-weight: 600;'>Monthly Net Savings</span><br>
+                <span style='margin: 0; color: #60A5FA; font-size: 1.5rem; font-weight: bold;'>€ {net_savings_val:,.2f}</span>
+            </div>
         </div>
     """, unsafe_allow_html=True)
 
     with st.container(border=True):
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Transactions", num_tx)
-        col2.metric("Incoming", f"€ {total_incoming:,.2f}", delta_color="normal")
-        col3.metric("Outgoing", f"€ {total_outgoing:,.2f}", delta_color="inverse")
+        col2.metric("Real Income", f"€ {real_income_val:,.2f}", help="Reddito reale (escluse entrate da risparmi o rimborsi)")
+        col3.metric("Real Expenses (Net)", f"€ {real_expenses_val:,.2f}", help="Spese effettive (Uscite - Rimborsi)", delta_color="inverse")
         col4.metric("Top Category", top_cat)
 
 
@@ -109,7 +133,9 @@ def render_dashboard(data):
 
     st.markdown(f"<h3 style='text-align: center;'>{chart_title_prefix} by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.plotly_chart(plot_category_pie(data), width="stretch", key="chart_category_pie")
+        # Exclude internal transfers and refunds from pie chart to avoid distortion
+        pie_data = [r for r in data if r.get("category") not in [SAVINGS_CAT, REFUND_CAT]]
+        st.plotly_chart(plot_category_pie(pie_data), width="stretch", key="chart_category_pie")
 
     st.markdown(f"<h3 style='text-align: center;'>Total {chart_title_prefix} by Category</h3>", unsafe_allow_html=True)
     with st.container(border=True):
