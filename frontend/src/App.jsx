@@ -10,7 +10,9 @@ import {
   ArrowUpRight, 
   ArrowDownRight, 
   CheckCircle2,
-  Info
+  Info,
+  Zap,
+  X
 } from 'lucide-react';
 import { 
   AreaChart, 
@@ -22,7 +24,9 @@ import {
   ResponsiveContainer,
   PieChart,
   Pie,
-  Cell
+  Cell,
+  BarChart,
+  Bar
 } from 'recharts';
 
 import TransactionsTable from './components/TransactionsTable';
@@ -40,7 +44,17 @@ const App = () => {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [selectedCategories, setSelectedCategories] = useState([]);
   const [transactions, setTransactions] = useState([]);
-  const [stats, setStats] = useState({ total_amount: 0, transaction_count: 0, monthly_income: 0, monthly_expense: 0, monthly_savings: 0, income_delta: 0, expense_delta: 0, savings_delta: 0 });
+  const [stats, setStats] = useState({ 
+    total_amount: 0, 
+    transaction_count: 0, 
+    monthly_income: 0, 
+    monthly_expense: 0, 
+    monthly_savings: 0, 
+    net_balance: 0,
+    income_delta: 0, 
+    expense_delta: 0, 
+    savings_delta: 0 
+  });
   const [pendingCount, setPendingCount] = useState(0);
   const [categories, setCategories] = useState([]);
   const [dailyData, setDailyData] = useState([]);
@@ -52,13 +66,45 @@ const App = () => {
   const [profiles, setProfiles] = useState([]);
   const [selectedProfileId, setSelectedProfileId] = useState(1);
   const [pendingFile, setPendingFile] = useState(null);
+  const [selectedTipology, setSelectedTipology] = useState('All');
+  const [selectedStartDate, setSelectedStartDate] = useState(null);
+  const [selectedEndDate, setSelectedEndDate] = useState(null);
+  const [timeFreq, setTimeFreq] = useState('Daily');
+  const [chartIsCumulative, setChartIsCumulative] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+
+  const SAVINGS_CAT = "Savings & Investments";
+  const REFUND_CAT = "Refund";
 
   useEffect(() => {
+    // Restore state from URL
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('page');
+    if (tab) setActiveTab(tab.toLowerCase());
+    
+    const tipology = params.get('tipology');
+    if (tipology) setSelectedTipology(tipology);
+
+    const cats = params.get('categories');
+    if (cats) setSelectedCategories(cats.split(',').map(Number));
+  }, []);
+
+  useEffect(() => {
+    // Sync URL from state
+    const params = new URLSearchParams();
+    params.set('page', activeTab);
+    params.set('tipology', selectedTipology);
+    if (selectedCategories.length > 0) params.set('categories', selectedCategories.join(','));
+    
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+
     fetchStats();
     fetchTransactions();
     fetchProfiles();
     fetchCategories();
-  }, [currentMonth, currentYear, selectedCategories]);
+  }, [currentMonth, currentYear, selectedCategories, activeTab, selectedTipology, selectedStartDate, selectedEndDate]);
 
   const fetchCategories = async () => {
     try {
@@ -69,13 +115,29 @@ const App = () => {
     }
   };
 
-  const handleUpdateTransaction = async (txId, data) => {
+  const handleUpdateTransaction = async (txId, fieldOrData, value) => {
     try {
+      const data = typeof fieldOrData === 'string' ? { [fieldOrData]: value } : fieldOrData;
       await axios.patch(`${API_BASE}/transactions/${txId}`, data);
       fetchTransactions();
       fetchStats();
     } catch (err) {
       console.error("Update error:", err);
+    }
+  };
+
+  const handleBulkUpdate = async ({ changes, deleted_ids }) => {
+    try {
+      // In a real implementation, this would be a single POST /transactions/bulk
+      // For now we simulate or use multiple calls if the backend doesn't have it
+      await Promise.all([
+        ...changes.map(c => axios.patch(`${API_BASE}/transactions/${c.id}`, c)),
+        ...deleted_ids.map(id => axios.delete(`${API_BASE}/transactions/${id}`))
+      ]);
+      fetchTransactions();
+      fetchStats();
+    } catch (err) {
+      console.error("Bulk update error:", err);
     }
   };
 
@@ -108,9 +170,24 @@ const App = () => {
     }
   };
 
+  const handleCategoryChange = (catId) => {
+    setSelectedCategories(prev => {
+      if (catId === 'All') return [];
+      const current = prev.filter(c => c !== 'All');
+      if (current.includes(catId)) {
+        return current.filter(c => c !== catId);
+      }
+      return [...current, catId];
+    });
+  };
+
   const fetchTransactions = async () => {
     try {
-      const params = {};
+      const params = {
+        month: currentMonth,
+        year: currentYear,
+        tipology: selectedTipology !== 'All' ? selectedTipology : undefined
+      };
       if (selectedCategories.length > 0) params.category_ids = selectedCategories.join(',');
       const res = await axios.get(`${API_BASE}/transactions/`, { params });
       setTransactions(res.data);
@@ -228,56 +305,81 @@ const App = () => {
         </div>
 
         <div className="mt-8 border-t border-[#30363d] pt-8">
-          <h3 className="text-xs uppercase font-bold mb-4 tracking-wider">Filters</h3>
-          <div className="flex flex-col gap-4">
-            <div>
-              <label className="text-sm block mb-2">Select Year</label>
-              <select 
-                className="st-select" 
-                value={currentYear} 
-                onChange={(e) => setCurrentYear(parseInt(e.target.value))}
-              >
-                {[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-sm block mb-2">Select Month</label>
-              <select 
-                className="st-select"
-                value={currentMonth}
-                onChange={(e) => setCurrentMonth(parseInt(e.target.value))}
-              >
-                {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((m, i) => (
-                  <option key={m} value={i + 1}>{m}</option>
-                ))}
-              </select>
+          <h3 className="text-[10px] uppercase font-black mb-6 tracking-[0.2em] text-slate-500 px-2">Ingestion Engine</h3>
+          
+          <div className="px-2 space-y-6">
+            {/* Sidebar Uploader */}
+            <div 
+              className="border-2 border-dashed border-[#30363d] rounded-2xl p-6 text-center cursor-pointer hover:border-[#ff4b4b]/50 transition-all group bg-[#0d1117]"
+              onClick={() => document.getElementById('sidebar-file-input').click()}
+            >
+              <Upload size={24} className="mx-auto mb-3 text-slate-600 group-hover:text-[#ff4b4b] transition-colors" />
+              <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Drop Statement</p>
+              <input 
+                id="sidebar-file-input"
+                type="file" 
+                className="hidden" 
+                onChange={handleFileSelect}
+              />
             </div>
 
-            {/* Category multiselect */}
-            {categories.length > 0 && (
-              <div>
-                <label className="text-sm block mb-2">Filter Categories</label>
-                <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto">
-                  {categories.map(cat => (
-                    <label key={cat.id} className="flex items-center gap-2 text-sm cursor-pointer hover:text-white text-slate-400 transition-colors">
-                      <input
-                        type="checkbox"
-                        checked={selectedCategories.includes(cat.id)}
-                        onChange={(e) => {
-                          setSelectedCategories(prev =>
-                            e.target.checked
-                              ? [...prev, cat.id]
-                              : prev.filter(id => id !== cat.id)
-                          );
-                        }}
-                        className="accent-[#ff4b4b] w-3.5 h-3.5"
-                      />
-                      {cat.name}
-                    </label>
-                  ))}
+            {pendingFile && (
+              <motion.div 
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-[#ff4b4b]/10 border border-[#ff4b4b]/20 rounded-lg p-4 relative"
+              >
+                <p className="text-[10px] font-black text-[#ff4b4b] truncate mb-3 uppercase tracking-tighter">{pendingFile.name}</p>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={startIngestion}
+                    className="btn-primary flex-1 text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Archive
+                  </button>
+                  <button 
+                    onClick={() => { setPendingFile(null); setAnalysisResult(null); }}
+                    className="p-2 text-slate-500 hover:text-white transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
                 </div>
-              </div>
+              </motion.div>
             )}
+
+            <button className="btn-secondary w-full py-3 flex items-center justify-center gap-3 shadow-xl group uppercase tracking-[0.2em] text-[10px] font-black">
+              <Zap size={14} className="text-[#ff4b4b] group-hover:scale-125 transition-transform" /> Process Data
+            </button>
+          </div>
+
+          <div className="mt-10 px-2 space-y-4">
+            <h3 className="text-[10px] uppercase font-black mb-4 tracking-[0.2em] text-slate-500">Global Controls</h3>
+            <label className="flex items-center justify-between cursor-pointer group">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">Advanced Mode</span>
+              <div className="relative">
+                <input 
+                  type="checkbox" 
+                  className="sr-only" 
+                  checked={showAdvanced}
+                  onChange={(e) => setShowAdvanced(e.target.checked)}
+                />
+                <div className={`w-8 h-4 rounded-full transition-colors ${showAdvanced ? 'bg-[#ff4b4b]' : 'bg-[#30363d]'}`} />
+                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${showAdvanced ? 'translate-x-4' : ''}`} />
+              </div>
+            </label>
+            <label className="flex items-center justify-between cursor-pointer group">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">Needs Review</span>
+              <div className="relative">
+                <input 
+                  type="checkbox" 
+                  className="sr-only" 
+                  checked={needsReviewOnly}
+                  onChange={(e) => setNeedsReviewOnly(e.target.checked)}
+                />
+                <div className={`w-8 h-4 rounded-full transition-colors ${needsReviewOnly ? 'bg-[#ff4b4b]' : 'bg-[#30363d]'}`} />
+                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${needsReviewOnly ? 'translate-x-4' : ''}`} />
+              </div>
+            </label>
           </div>
         </div>
 
@@ -298,43 +400,216 @@ const App = () => {
 
       {/* Main Area */}
       <main className="st-main">
+        {activeTab !== 'settings' && (
+          <header className="mb-12">
+            <h1 className="text-center font-bold text-4xl mb-8">Personal BI Assistant</h1>
+            
+            {/* Filter Container (Bordered Card) */}
+            <div className="st-card grid grid-cols-12 gap-6 items-end">
+              {/* Col 1 (Width 3): Category Multiselect */}
+              <div className="col-span-3">
+                <label className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 block">Categories</label>
+                <div className="relative group">
+                  <div className="st-input min-h-[40px] h-auto py-2 px-3 flex flex-wrap gap-1 cursor-pointer">
+                    {selectedCategories.length === 0 ? (
+                      <span className="text-slate-500 text-sm">All Categories</span>
+                    ) : (
+                      selectedCategories.map(catId => {
+                        const cat = categories.find(c => c.id === catId);
+                        return (
+                          <span key={catId} className="bg-[#ff4b4b]/20 text-[#ff4b4b] text-[10px] font-black uppercase px-2 py-0.5 rounded flex items-center gap-1">
+                            {cat?.name || catId}
+                            <X size={10} className="cursor-pointer hover:text-white" onClick={(e) => { e.stopPropagation(); handleCategoryChange(catId); }} />
+                          </span>
+                        );
+                      })
+                    )}
+                  </div>
+                  {/* Custom Dropdown on Hover/Click */}
+                  <div className="absolute top-full left-0 w-64 mt-2 bg-[#1f2937] border border-[#374151] rounded-xl shadow-2xl z-50 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-all p-2 max-h-64 overflow-y-auto">
+                    <div 
+                      className={`px-3 py-2 rounded-lg text-xs cursor-pointer mb-1 ${selectedCategories.length === 0 ? 'bg-[#ff4b4b] text-white' : 'hover:bg-white/5 text-slate-300'}`}
+                      onClick={() => handleCategoryChange('All')}
+                    >
+                      All Categories
+                    </div>
+                    {categories.map(cat => (
+                      <div 
+                        key={cat.id}
+                        className={`px-3 py-2 rounded-lg text-xs cursor-pointer mb-1 ${selectedCategories.includes(cat.id) ? 'bg-[#ff4b4b]/20 text-[#ff4b4b] font-bold' : 'hover:bg-white/5 text-slate-400'}`}
+                        onClick={() => handleCategoryChange(cat.id)}
+                      >
+                        {cat.name}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Col 2 (Width 3): Tipology */}
+              <div className="col-span-3">
+                <label className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 block">Tipology</label>
+                <select 
+                  className="st-select mb-0 h-10"
+                  value={selectedTipology}
+                  onChange={(e) => setSelectedTipology(e.target.value)}
+                >
+                  <option value="All">All Transactions</option>
+                  <option value="Incoming">Incoming (Credits)</option>
+                  <option value="Outgoing">Outgoing (Debits)</option>
+                </select>
+              </div>
+
+              {/* Col 3 (Width 6): Date Range (Simplified as Month/Year for now) */}
+              <div className="col-span-6 grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 block">Year</label>
+                  <select 
+                    className="st-select mb-0 h-10" 
+                    value={currentYear} 
+                    onChange={(e) => setCurrentYear(parseInt(e.target.value))}
+                  >
+                    {[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 block">Month</label>
+                  <select 
+                    className="st-select mb-0 h-10"
+                    value={currentMonth}
+                    onChange={(e) => setCurrentMonth(parseInt(e.target.value))}
+                  >
+                    {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((m, i) => (
+                      <option key={m} value={i + 1}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          </header>
+        )}
+
         <AnimatePresence mode="wait">
           {activeTab === 'dashboard' && (
             <motion.div key="dashboard" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <h1 className="st-heading">Financial Dashboard</h1>
               
+              {/* Net Balance Widget Banner */}
+              <div className="st-card bg-gradient-to-r from-[#1f2937] to-[#111827] border-[#374151] shadow-2xl relative overflow-hidden group mb-8">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-[#ff4b4b]/5 rounded-full -mr-32 -mt-32 blur-3xl group-hover:bg-[#ff4b4b]/10 transition-all duration-700" />
+                <div className="relative z-10 flex justify-around py-2 w-full">
+                  <div className="text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-2">Net Balance</p>
+                    <p className="text-3xl font-black text-[#00d4ff] tracking-tight">€{(stats.net_balance || 0).toLocaleString('it-IT', { minimumFractionDigits: 2 })}</p>
+                  </div>
+                  <div className="w-px h-12 bg-[#374151] self-center" />
+                  <div className="text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-2">Monthly Net Savings</p>
+                    <p className="text-3xl font-black text-white tracking-tight">€{(stats.monthly_savings || 0).toLocaleString('it-IT', { minimumFractionDigits: 2 })}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Review Warning */}
+              {transactions.some(t => t.confidence < 0.7) && (
+                <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4 mb-8 flex items-center gap-3 text-yellow-200 text-sm">
+                  <Info size={18} className="shrink-0" />
+                  <span>Some transactions have low classification confidence (&lt; 70%) and should be reviewed in the Data Explorer.</span>
+                </div>
+              )}
+
               {/* Metrics Row */}
               <div className="grid grid-cols-4 gap-6 mb-12">
                 <div className="st-metric-card">
-                  <span className="st-metric-label">Total Balance</span>
-                  <span className="st-metric-value">€{stats.total_amount.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
+                  <span className="st-metric-label">Transactions</span>
+                  <span className="st-metric-value">{stats.transaction_count}</span>
                 </div>
                 <div className="st-metric-card">
-                  <span className="st-metric-label">Monthly Income</span>
-                  <span className="st-metric-value">€{stats.monthly_income.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-                  {stats.income_delta !== undefined && (
+                  <span className="st-metric-label">Real Income</span>
+                  <span className="st-metric-value">€{(stats.monthly_income || 0).toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
+                  {stats.income_delta !== null && stats.income_delta !== undefined && (
                     <span className={`st-metric-delta ${stats.income_delta >= 0 ? 'up' : 'down'}`}>
                       {stats.income_delta >= 0 ? '↑' : '↓'} {Math.abs(stats.income_delta).toFixed(1)}% vs prev. month
                     </span>
                   )}
                 </div>
                 <div className="st-metric-card">
-                  <span className="st-metric-label">Monthly Spending</span>
-                  <span className="st-metric-value text-[#ff4b4b]">€{stats.monthly_expense.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-                  {stats.expense_delta !== undefined && (
+                  <span className="st-metric-label">Real Expenses (Net)</span>
+                  <span className="st-metric-value text-[#ff4b4b]">€{(stats.monthly_expense || 0).toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
+                  {stats.expense_delta !== null && stats.expense_delta !== undefined && (
                     <span className={`st-metric-delta ${stats.expense_delta <= 0 ? 'up' : 'down'}`}>
                       {stats.expense_delta >= 0 ? '↑' : '↓'} {Math.abs(stats.expense_delta).toFixed(1)}% vs prev. month
                     </span>
                   )}
                 </div>
                 <div className="st-metric-card">
-                  <span className="st-metric-label">Monthly Savings</span>
-                  <span className="st-metric-value text-[#2ecc71]">€{stats.monthly_savings.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-                  {stats.savings_delta !== undefined && (
-                    <span className={`st-metric-delta ${stats.savings_delta >= 0 ? 'up' : 'down'}`}>
-                      {stats.savings_delta >= 0 ? '↑' : '↓'} {Math.abs(stats.savings_delta).toFixed(1)}% vs prev. month
-                    </span>
-                  )}
+                  <span className="st-metric-label">Top Category</span>
+                  <span className="st-metric-value text-sm truncate">
+                    {categoryData[0]?.name || "N/A"}
+                  </span>
+                </div>
+              </div>
+              {/* Time Series Chart */}
+              <div className="st-card">
+                <div className="flex justify-between items-center mb-8">
+                  <h2 className="st-heading border-none p-0 text-sm font-black uppercase tracking-[0.2em] text-slate-500 m-0">Amount Over Time</h2>
+                  <div className="flex gap-4">
+                    <div className="flex bg-[#111827] rounded p-1 border border-[#374151]">
+                      {['Daily', 'Weekly', 'Monthly'].map(freq => (
+                        <button 
+                          key={freq}
+                          onClick={() => setTimeFreq(freq)}
+                          className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded transition-all ${timeFreq === freq ? 'bg-[#ff4b4b] text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                        >
+                          {freq}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex bg-[#111827] rounded p-1 border border-[#374151]">
+                      {[
+                        { id: true, label: 'Cumulative' },
+                        { id: false, label: 'Periodical' }
+                      ].map(type => (
+                        <button 
+                          key={type.label}
+                          onClick={() => setChartIsCumulative(type.id)}
+                          className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded transition-all ${chartIsCumulative === type.id ? 'bg-[#ff4b4b] text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                        >
+                          {type.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={dailyData}>
+                      <defs>
+                        <linearGradient id="colorAmount" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#ff4b4b" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#ff4b4b" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                      <XAxis 
+                        dataKey="name" 
+                        stroke="#8b949e" 
+                        fontSize={10} 
+                        tickFormatter={(val) => val.split('-').slice(1).join('/')}
+                      />
+                      <YAxis stroke="#8b949e" fontSize={10} />
+                      <Tooltip 
+                        contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: '8px', fontSize: '11px' }}
+                      />
+                      <Area 
+                        type="monotone" 
+                        dataKey="value" 
+                        stroke="#ff4b4b" 
+                        fillOpacity={1} 
+                        fill="url(#colorAmount)" 
+                        strokeWidth={3}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
 
@@ -346,80 +621,82 @@ const App = () => {
                 </div>
               </div>
 
-              {/* Two Column Charts */}
-              <div className="grid grid-cols-2 gap-8 mt-8">
-                <div className="st-card">
-                  <h2 className="st-heading border-none p-0 text-lg">Spending Trend</h2>
-                  <div className="h-80 mt-4">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={dailyData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                        <XAxis 
-                          dataKey="name" 
-                          stroke="#8b949e"
-                          tickFormatter={(val) => {
-                            try {
-                              const d = new Date(val);
-                              return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
-                            } catch { return val; }
-                          }}
-                          tick={{ fontSize: 11 }}
-                        />
-                        <YAxis stroke="#8b949e" tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
-                        <Tooltip 
-                          contentStyle={{ background: '#161b22', border: '1px solid #30363d', fontSize: 12 }} 
-                          formatter={(v) => [`€${Math.abs(v).toLocaleString('it-IT', {minimumFractionDigits: 2})}`, 'Amount']}
-                        />
-                        <Area type="monotone" dataKey="value" stroke="#ff4b4b" fill="#ff4b4b" fillOpacity={0.1} strokeWidth={2} />
-                      </AreaChart>
-                    </ResponsiveContainer>
+                <div className="grid grid-cols-2 gap-8 mt-8">
+                  {/* Category Pie */}
+                  <div className="st-card p-8">
+                    <h2 className="st-heading border-none p-0 text-sm font-black uppercase tracking-[0.2em] text-slate-500 mb-8 m-0">Category Distribution</h2>
+                    <div className="flex gap-8 items-center h-64">
+                      <div className="w-48 h-48 shrink-0 relative">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={categoryData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={85}
+                              paddingAngle={5}
+                              dataKey="value"
+                              stroke="none"
+                            >
+                              {(Array.isArray(categoryData) ? categoryData : []).map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                              ))}
+                            </Pie>
+                            <Tooltip 
+                              contentStyle={{ background: '#161b22', border: '1px solid #30363d', fontSize: 11, borderRadius: '12px', padding: '12px' }}
+                              formatter={(v) => [`€${v.toLocaleString('it-IT', {minimumFractionDigits:2})}`, '']}
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Total</span>
+                          <span className="text-lg font-black text-white">€{((Array.isArray(categoryData) ? categoryData : []).reduce((s, d) => s + (d.value || 0), 0) / 1000).toFixed(1)}k</span>
+                        </div>
+                      </div>
+                      <div className="flex-1 space-y-3 overflow-y-auto max-h-full pr-2">
+                        {(Array.isArray(categoryData) ? categoryData : []).slice(0, 6).map((item, index) => (
+                          <div key={item.name} className="flex items-center justify-between text-[11px]">
+                            <div className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full" style={{ background: COLORS[index % COLORS.length] }} />
+                              <span className="text-slate-400 font-medium">{item.name}</span>
+                            </div>
+                            <span className="text-white font-bold">€{(item.value || 0).toLocaleString('it-IT')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="st-card">
-                  <h2 className="st-heading border-none p-0 text-lg">Category Breakdown</h2>
-                  <div className="flex gap-4 mt-4">
-                    {/* Pie */}
-                    <div className="w-48 h-48 shrink-0">
+
+                  {/* Category Bar Chart */}
+                  <div className="st-card p-8">
+                    <h2 className="st-heading border-none p-0 text-sm font-black uppercase tracking-[0.2em] text-slate-500 mb-8 m-0">Top Expenses</h2>
+                    <div className="h-64 mt-4">
                       <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={categoryData}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={50}
-                            outerRadius={70}
-                            paddingAngle={3}
-                            dataKey="value"
-                          >
-                            {categoryData.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        <BarChart data={(Array.isArray(categoryData) ? categoryData : []).slice(0, 8)} layout="vertical">
+                          <CartesianGrid strokeDasharray="3 3" stroke="#30363d" horizontal={false} />
+                          <XAxis type="number" hide />
+                          <YAxis 
+                            type="category" 
+                            dataKey="name" 
+                            stroke="#8b949e" 
+                            width={100}
+                            tick={{ fontSize: 10, fontWeight: 700 }}
+                          />
+                          <Tooltip 
+                            cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+                            contentStyle={{ background: '#161b22', border: '1px solid #30363d', fontSize: 11, borderRadius: '12px' }}
+                          />
+                          <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                            {(Array.isArray(categoryData) ? categoryData : []).map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} fillOpacity={0.8} />
                             ))}
-                          </Pie>
-                          <Tooltip formatter={(v) => [`€${v.toLocaleString('it-IT', {minimumFractionDigits:2})}`, '']} />
-                        </PieChart>
+                          </Bar>
+                        </BarChart>
                       </ResponsiveContainer>
                     </div>
-                    {/* Legend */}
-                    <div className="flex flex-col gap-2 overflow-y-auto flex-1 justify-center">
-                      {(() => {
-                        const total = categoryData.reduce((s, d) => s + d.value, 0);
-                        return categoryData.map((item, index) => (
-                          <div key={item.name} className="flex items-center justify-between text-xs gap-2">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
-                              <span className="text-slate-300 truncate">{item.name}</span>
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-slate-500">{total ? Math.round((item.value / total) * 100) : 0}%</span>
-                              <span className="font-semibold text-slate-200">€{item.value.toLocaleString('it-IT', {minimumFractionDigits: 2})}</span>
-                            </div>
-                          </div>
-                        ));
-                      })()}
-                    </div>
                   </div>
                 </div>
-              </div>
 
               {/* Recent Transactions Section */}
               <h2 className="st-heading mt-12">Recent Transactions</h2>
@@ -433,7 +710,7 @@ const App = () => {
               <TransactionsView 
                 transactions={transactions} 
                 categories={categories} 
-                onUpdate={handleUpdateTransaction} 
+                onUpdate={handleBulkUpdate} 
               />
             </motion.div>
           )}
@@ -550,7 +827,7 @@ const App = () => {
           {activeTab === 'settings' && (
             <motion.div key="settings" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <h1 className="st-heading">Settings</h1>
-              <SettingsView />
+              <SettingsView showAdvanced={showAdvanced} />
             </motion.div>
           )}
         </AnimatePresence>

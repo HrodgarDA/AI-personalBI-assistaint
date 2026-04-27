@@ -5,11 +5,54 @@ import { Search, Filter } from 'lucide-react';
 
 const TransactionsView = ({ transactions, categories, onUpdate }) => {
   const [searchTerm, setSearchTerm] = React.useState('');
+  const [editMode, setEditMode] = React.useState(false);
+  const [selectedIds, setSelectedIds] = React.useState([]);
+
+  const [pendingChanges, setPendingChanges] = React.useState({});
+  const [pendingDeletions, setPendingDeletions] = React.useState(new Set());
 
   const filteredTransactions = transactions.filter(tx => 
-    (tx.merchant?.name || tx.operation || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (tx.details || '').toLowerCase().includes(searchTerm.toLowerCase())
+    !pendingDeletions.has(tx.id) &&
+    ((tx.merchant?.name || tx.operation || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (tx.details || '').toLowerCase().includes(searchTerm.toLowerCase()))
   );
+
+  const handleDeleteSelected = () => {
+    setPendingDeletions(prev => {
+      const next = new Set(prev);
+      selectedIds.forEach(id => next.add(id));
+      return next;
+    });
+    setSelectedIds([]);
+  };
+
+  const handleLocalUpdate = (txId, field, value) => {
+    setPendingChanges(prev => ({
+      ...prev,
+      [txId]: { ...prev[txId], [field]: value }
+    }));
+  };
+
+  const handleSaveAll = async () => {
+    try {
+      const changes = Object.entries(pendingChanges).map(([id, data]) => ({ id: parseInt(id), ...data }));
+      const deletedIds = Array.from(pendingDeletions);
+      
+      if (onUpdate) {
+        // We assume onUpdate can handle a bulk object or we loop
+        // The architecture doc says: log_feedback_and_update_silver(changes, deleted_ids)
+        await onUpdate({ changes, deleted_ids: deletedIds });
+      }
+      
+      setPendingChanges({});
+      setPendingDeletions(new Set());
+      alert("Changes saved successfully!");
+    } catch (err) {
+      console.error("Save error:", err);
+    }
+  };
+
+  const hasChanges = Object.keys(pendingChanges).length > 0 || pendingDeletions.size > 0;
 
   return (
     <motion.div 
@@ -18,17 +61,49 @@ const TransactionsView = ({ transactions, categories, onUpdate }) => {
       exit={{ opacity: 0, x: -20 }}
       className="flex flex-col gap-6"
     >
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">Transaction History</h2>
-        <div className="flex gap-3">
+      <div className="flex justify-between items-center bg-[#111827] p-3 rounded border border-[#374151]/50 mb-2">
+        <div className="flex items-center gap-6">
+          <div className="text-xs text-slate-500 font-bold uppercase tracking-widest">
+            Showing <span className="text-white">{filteredTransactions.length}</span> of <span className="text-white">{transactions.length}</span> transactions
+          </div>
+          <div className="w-px h-4 bg-[#374151]" />
+          <label className="flex items-center gap-3 cursor-pointer">
+            <span className={`text-[10px] font-black uppercase tracking-widest ${!editMode ? 'text-white' : 'text-slate-500'}`}>View</span>
+            <div 
+              className={`w-10 h-5 rounded-full relative transition-colors ${editMode ? 'bg-[#ff4b4b]' : 'bg-[#374151]'}`}
+              onClick={() => setEditMode(!editMode)}
+            >
+              <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-lg transition-all ${editMode ? 'left-5.5' : 'left-0.5'}`} style={{ left: editMode ? '1.375rem' : '0.125rem' }} />
+            </div>
+            <span className={`text-[10px] font-black uppercase tracking-widest ${editMode ? 'text-white' : 'text-slate-500'}`}>Edit</span>
+          </label>
+        </div>
+
+        <div className="flex gap-2">
+          {editMode && hasChanges && (
+            <button 
+              onClick={handleSaveAll}
+              className="btn-primary bg-emerald-600 border-emerald-500 hover:bg-emerald-500 flex items-center gap-2"
+            >
+              💾 Save Changes
+            </button>
+          )}
+          {editMode && selectedIds.length > 0 && (
+            <button 
+              onClick={handleDeleteSelected}
+              className="btn-primary flex items-center gap-2"
+            >
+              🗑️ Delete Selected ({selectedIds.length})
+            </button>
+          )}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={14} />
             <input 
               type="text" 
-              placeholder="Filter by merchant..." 
+              placeholder="Search..." 
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="st-input pl-9 w-48 py-2 text-sm"
+              className="st-input pl-9 w-40 py-1.5 text-xs rounded"
             />
           </div>
           <button 
@@ -51,12 +126,9 @@ const TransactionsView = ({ transactions, categories, onUpdate }) => {
               document.body.appendChild(link);
               link.click();
             }}
-            className="btn-primary px-4 py-2 text-sm flex items-center gap-2"
+            className="btn-secondary flex items-center gap-2 uppercase text-[10px] font-black tracking-widest"
           >
             Export CSV
-          </button>
-          <button className="btn-primary px-4 py-2 text-sm flex items-center gap-2">
-            <Filter size={16} /> Filters
           </button>
         </div>
       </div>
@@ -64,7 +136,11 @@ const TransactionsView = ({ transactions, categories, onUpdate }) => {
       <TransactionsTable 
         transactions={filteredTransactions} 
         categories={categories} 
-        onUpdate={onUpdate} 
+        onUpdate={handleLocalUpdate} 
+        editMode={editMode}
+        selectedIds={selectedIds}
+        setSelectedIds={setSelectedIds}
+        pendingChanges={pendingChanges}
       />
     </motion.div>
   );

@@ -28,3 +28,14 @@ scratch/
 
 # --- Agents & Skills ---
 skills-lock.json
+
+# --- Web / Frontend ---
+node_modules/
+dist/
+.vite/
+.next/
+*.log
+
+# --- Process IDs ---
+.api.pid
+.worker.pid
