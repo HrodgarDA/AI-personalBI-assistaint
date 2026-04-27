@@ -70,8 +70,8 @@ def render_dashboard(data):
     with st.container(border=True):
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Transactions", num_tx)
-        col2.metric("Real Income", f"€ {real_income_val:,.2f}", help="Reddito reale (escluse entrate da risparmi o rimborsi)")
-        col3.metric("Real Expenses (Net)", f"€ {real_expenses_val:,.2f}", help="Spese effettive (Uscite - Rimborsi)", delta_color="inverse")
+        col2.metric("Real Income", f"€ {real_income_val:,.2f}", help="Real income (excluding savings transfers or internal refunds)")
+        col3.metric("Real Expenses (Net)", f"€ {real_expenses_val:,.2f}", help="Actual expenses (Outgoing - Refunds)", delta_color="inverse")
         col4.metric("Top Category", top_cat)
 
 

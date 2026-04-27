@@ -1,29 +1,20 @@
 import streamlit as st
+import time
 import sys
-import os
 from pathlib import Path
+from datetime import date, timedelta
 
-# Ensure local 'src' directory is prioritized in sys.path
+# Ensure local 'src' directory is available for legacy imports
 src_path = str(Path(__file__).parent.parent / "src")
 if src_path not in sys.path:
-    sys.path.insert(0, src_path)
+    sys.path.append(src_path)
 
-from datetime import date, timedelta
-from common import apply_theme, load_data, DATA_PATH, restore_state_from_url, sync_url_from_state, parse_date
+from api_client import api_client
+from common import apply_theme, load_data, restore_state_from_url, sync_url_from_state, parse_date
 from dashboard import render_dashboard
 from data_editor import render_table
 from settings import render_settings
-from services import filter_dataset, get_available_categories
-from auto_bi.core.ingestion import ingest_tabular_data, analyze_file_for_ui
-from auto_bi.core.process import run_processing, run_certify
-from auto_bi.utils.config import BRONZE_RAW
-from auto_bi.utils.bank_profile import load_bank_profile, get_active_profile_name
-
-@st.cache_data(show_spinner="Analyzing file...")
-def cached_analyze_file(uploaded_file):
-    """Cached wrapper for file analysis to prevent UI freezes."""
-    return analyze_file_for_ui(uploaded_file)
-
+from ui_services import filter_dataset, fetch_categories
 
 def main():
     st.set_page_config(page_title="Personal BI Assistant", page_icon="📈", layout="wide")
@@ -42,13 +33,13 @@ def main():
     st.sidebar.title("Navigation")
     
     # Navigation
-    if st.sidebar.button("📊 Dashboard", width="stretch"):
+    if st.sidebar.button("📊 Dashboard", width="stretch", key="nav_dashboard"):
         st.session_state["current_page"] = "Dashboard"
         sync_url_from_state()
-    if st.sidebar.button("🔍 Data Explorer", width="stretch"):
+    if st.sidebar.button("🔍 Data Explorer", width="stretch", key="nav_explorer"):
         st.session_state["current_page"] = "Table"
         sync_url_from_state()
-    if st.sidebar.button("⚙️ Settings", width="stretch"):
+    if st.sidebar.button("⚙️ Settings", width="stretch", key="nav_settings"):
         st.session_state["current_page"] = "Settings"
         sync_url_from_state()
 
@@ -57,71 +48,47 @@ def main():
     # ETL Controls
     st.sidebar.subheader("📥 Data Ingestion")
     
-    uploaded_file = st.sidebar.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
+    uploaded_file = st.sidebar.file_uploader("Upload PDF Bank Statement", type=["pdf"])
     
     if uploaded_file is not None:
-        stats = cached_analyze_file(uploaded_file)
-        if "error" in stats:
-            st.sidebar.error(stats["error"])
-        else:
-            with st.sidebar.container(border=True):
-                st.markdown("##### 📊 File Analysis")
-                c1, c2 = st.columns(2)
-                c1.metric("Total Rows", stats["total_rows"])
-                c2.metric("New Rows", stats["new_rows"])
+        if st.sidebar.button("🚀 Process with AI", type="primary", width="stretch", key="btn_process_ai"):
+            with st.sidebar.status("Uploading & Processing...", expanded=True) as status:
+                st.write("📤 Uploading file...")
+                profile_name = st.session_state.get("active_profile_name", "Default")
+                result = api_client.upload_file(uploaded_file, profile_name)
                 
-                # Format time
-                seconds = stats["estimated_seconds"]
-                if seconds >= 60:
-                    time_str = f"{int(seconds // 60)}m {int(seconds % 60)}s"
-                else:
-                    time_str = f"{int(seconds)}s"
-                
-                st.write(f"⏱️ **Estimated processing time:** {time_str}")
-                if stats["new_rows"] > 0:
-                    st.caption(f"Based on your recent speed: {stats['avg_speed']:.2f}s/tx")
-    
-    col_ing, col_proc = st.sidebar.columns(2)
-    
-    if col_ing.button("Archive", width="stretch", help="Securely save uploaded file to the data archive"):
-        if uploaded_file is not None:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            def update_progress_archive(current, total):
-                p = min(current / total, 1.0) if total > 0 else 1.0
-                progress_bar.progress(p)
-                status_text.write(f"**Progress:** {current}/{total} rows")
-            with st.spinner("Archiving..."):
-                rows_added = ingest_tabular_data(uploaded_file, progress_callback=update_progress_archive)
-                if rows_added > 0:
-                    st.success(f"Archived {rows_added} rows.")
-                else:
-                    st.info("No new rows found.")
-        else:
-            st.error("Upload file first!")
-
-    if col_proc.button("Process", width="stretch", type="primary", help="Categorize transactions using AI"):
-        if not Path(BRONZE_RAW).exists():
-            st.warning("No data found. Archive a file first.")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            def update_p(current, total):
-                p = min(current / total, 1.0) if total > 0 else 1.0
-                progress_bar.progress(p)
-                status_text.write(f"**Progress:** {current}/{total} transactions")
-            with st.spinner("Processing..."):
-                run_processing(progress_callback=update_p)
-                run_certify()
-            st.success("Complete!")
-            st.info("💡 **Mac Tip:** If you have many transactions, run `caffeinate` in your terminal to prevent the Mac from sleeping during processing.")
-            st.cache_data.clear() # IMPORTANT: Clear cache to see new data
-            st.rerun()
+                if result and "task_id" in result:
+                    task_id = result["task_id"]
+                    st.write(f"⚙️ Task started: {task_id}")
+                    
+                    # Polling
+                    while True:
+                        task_info = api_client.get_task_status(task_id)
+                        if not task_info: break
+                        
+                        state = task_info.get("status")
+                        if state == "SUCCESS":
+                            status.update(label="✅ Processing Complete!", state="complete")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                            break
+                        elif state == "FAILURE":
+                            status.update(label="❌ Processing Failed", state="error")
+                            st.error(task_info.get("info"))
+                            break
+                        else:
+                            # Progress update
+                            info = task_info.get("info") or {}
+                            msg = info.get("msg", "Processing...")
+                            st.write(f"🔄 {msg}")
+                        
+                        time.sleep(2)
 
     st.sidebar.markdown("---")
     # Global Filters & Dev Tools
     st.sidebar.checkbox("🔧 Show Advanced Settings", key="show_adv_global", on_change=sync_url_from_state)
-    needs_review = st.sidebar.checkbox("⚠️ Needs Review", key="needs_review", help="Show only transactions with confidence < 0.7", on_change=sync_url_from_state)
+    needs_review = st.sidebar.checkbox("⚠️ Needs Review", key="needs_review", help="Show only transactions with low confidence", on_change=sync_url_from_state)
 
     # Page Dispatcher
     if st.session_state["current_page"] == "Settings":
@@ -130,18 +97,15 @@ def main():
         # Load Data
         data = load_data()
         
-        if not DATA_PATH.exists():
-            st.info("Welcome to your personal BI assistaint! Start by uploading your bank statement in the sidebar.")
-            st.stop()
-        elif not data:
-            st.warning("Il file dati è vuoto.")
+        if not data:
+            st.info("Welcome to your personal BI assistant! Start by uploading your bank statement in the sidebar.")
             st.stop()
             
         st.markdown("<h1 style='text-align: center;'>Personal BI Assistant</h1>", unsafe_allow_html=True)
         
         # 1. Filter Logic & State Orchestration
         with st.container(border=True):
-            tipologies = sorted({str(row.get("tipology", row.get("direction", ""))) for row in data if row.get("tipology", row.get("direction", ""))})
+            tipologies = sorted({str(row.get("tipology", "")) for row in data if row.get("tipology")})
             tipologies.insert(0, "All")
             
             dates = [row.get("parsed_date") for row in data if row.get("parsed_date") is not None]
@@ -152,7 +116,6 @@ def main():
             today = date.today()
             default_start = max(min_date, min(max_date, date(today.year, 1, 1)))
             default_end = max(min_date, min(max_date, today))
-            if default_start > default_end: default_start, default_end = min_date, max_date
 
             col1, col2, col3 = st.columns([2, 2, 4])
             
@@ -161,8 +124,7 @@ def main():
             selected_tipology = col2.selectbox("Tipology", tipologies, index=t_index, key="selected_tipology", on_change=sync_url_from_state)
             
             # Categories (Dynamic list via Service)
-            profile = load_bank_profile(get_active_profile_name())
-            available_categories = get_available_categories(data, profile, selected_tipology)
+            available_categories = fetch_categories(selected_tipology)
             
             # Mutual Exclusive "All" Logic
             if "prev_cats" not in st.session_state: st.session_state.prev_cats = ["All"]
@@ -180,8 +142,8 @@ def main():
             
             # Date Range Slider
             if min_date < max_date:
-                s_date = parse_date(st.session_state.get("selected_start_date")) if isinstance(st.session_state.get("selected_start_date"), str) else st.session_state.get("selected_start_date", default_start)
-                e_date = parse_date(st.session_state.get("selected_end_date")) if isinstance(st.session_state.get("selected_end_date"), str) else st.session_state.get("selected_end_date", default_end)
+                s_date = parse_date(st.session_state.get("selected_start_date")) or default_start
+                e_date = parse_date(st.session_state.get("selected_end_date")) or default_end
                 
                 selected_dates = col3.slider("Date Range", min_value=min_date, max_value=max_date, value=(s_date, e_date), format="DD/MM/YYYY", key="date_range_slider")
                 st.session_state.selected_start_date, st.session_state.selected_end_date = selected_dates

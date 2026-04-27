@@ -1,30 +1,25 @@
 import streamlit as st
 import time
 import pandas as pd
-from auto_bi.utils.feedback import log_feedback_and_update_silver
-from auto_bi.utils.bank_profile import load_bank_profile, get_active_profile_name
+from api_client import api_client
 
 def render_table(filtered, total_len):
-    profile_name = get_active_profile_name()
-    profile = load_bank_profile(profile_name)
-    profile_cats = set(profile.outgoing_categories + profile.incoming_categories + ["Uncategorized"])
+    # Fetch categories from API
+    categories = api_client.get_categories()
+    valid_categories = sorted([c["id"] for c in categories] + ["Uncategorized"])
     
-    # Also include categories that are actually in the data to prevent blank cells in SelectboxColumn
-    present_cats = {r.get("category") for r in filtered if r.get("category")}
-    valid_categories = sorted(list(profile_cats.union(present_cats)))
-
     # Shared session state for deleted rows during this session
     if "pending_deletions" not in st.session_state:
         st.session_state.pending_deletions = set()
 
     st.markdown("<h2 style='text-align: center;'>📋 Data Explorer</h2>", unsafe_allow_html=True)
     
-    # Header Layout: Maximum alignment to the right with enough space for text
+    # Header Layout
     col_info, col_spacer, col_del, col_toggle = st.columns([0.5, 0.2, 0.18, 0.12])
     with col_info:
         st.write(f"**Showing {len(filtered)} of {total_len} transactions**")
     
-    # Delete Button logic (Minimal column)
+    # Delete Button logic
     display_data = [r for r in filtered if str(r.get("original_msg_id")) not in st.session_state.pending_deletions]
     
     edit_mode = col_toggle.toggle("🖊️ Edit", value=False, help="Enable Edit Mode")
@@ -60,26 +55,23 @@ def render_table(filtered, total_len):
         st.dataframe(styled_df, width="stretch", hide_index=True, height=700, column_order=column_order, column_config=col_config)
     else:
         # --- EDIT MODE ---
-        # Add 'Select' column to display_data
         for r in display_data:
             if "Select" not in r: r["Select"] = False
 
         st.warning("⚠️ You are in Edit Mode. Select rows to delete or modify values. Press 'Save Changes' to commit.")
         
-        # Data Editor with key for reactivity
         edited_data = st.data_editor(
             display_data,
             width="stretch",
             hide_index=True,
             height=600,
-            num_rows="fixed", # We handle deletions ourselves
+            num_rows="fixed",
             key="table_editor",
             column_order=column_order,
             column_config=col_config,
-            disabled=["parsed_date", "tipology", "original_operation", "original_details", "reasoning"]
+            disabled=["original_operation", "original_details", "reasoning"]
         )
 
-        # Reactive Delete Button logic (Only visible if edit_mode is ON)
         any_selected = any(row.get("Select") for row in edited_data)
         if edit_mode and col_del.button("🗑️ Delete Selected", type="secondary", disabled=not any_selected, width="stretch", help="Delete Selected Records"):
             selected_ids = [str(row["original_msg_id"]) for row in edited_data if row.get("Select")]
@@ -87,37 +79,36 @@ def render_table(filtered, total_len):
             st.rerun()
 
         if st.button("💾 Save Changes", type="primary", width="stretch"):
-            changes = []
-            
-            # 1. Permanent Deletions (Buffer)
-            final_deleted_ids = list(st.session_state.pending_deletions)
-            
-            # 2. Modifications (only for those NOT in blacklist)
+            # 1. Modifications
             original_map = {str(r.get("original_msg_id")): r for r in filtered}
+            mod_count = 0
             for new_row in edited_data:
                 msg_id = str(new_row.get("original_msg_id"))
                 if msg_id in original_map:
                     old_row = original_map[msg_id]
                     
-                    cat_changed = str(old_row.get("category")) != str(new_row.get("category"))
-                    amt_changed = old_row.get("amount") != new_row.get("amount")
-                    merch_changed = str(old_row.get("merchant")) != str(new_row.get("merchant"))
+                    changes = {}
+                    if str(old_row.get("category")) != str(new_row.get("category")):
+                        changes["category_id"] = new_row.get("category")
+                    if old_row.get("amount") != new_row.get("amount"):
+                        changes["amount"] = new_row.get("amount")
+                    if str(old_row.get("merchant")) != str(new_row.get("merchant")):
+                        changes["merchant_id"] = new_row.get("merchant")
                     
-                    if cat_changed or amt_changed or merch_changed:
-                        changes.append({
-                            "msg_id": msg_id,
-                            "original_category": old_row.get("category"),
-                            "corrected_category": new_row.get("category"),
-                            "original_amount": old_row.get("amount"),
-                            "corrected_amount": new_row.get("amount"),
-                            "original_merchant": old_row.get("merchant"),
-                            "corrected_merchant": new_row.get("merchant"),
-                        })
+                    if changes:
+                        api_client.update_transaction(msg_id, changes)
+                        mod_count += 1
             
-            if changes or final_deleted_ids:
-                log_feedback_and_update_silver(changes, deleted_ids=final_deleted_ids)
-                st.session_state.pending_deletions = set() # Clear buffer
-                st.toast(f"✅ Saved modifications and deleted {len(final_deleted_ids)} records!", icon="💾")
+            # 2. Deletions
+            del_count = 0
+            for del_id in st.session_state.pending_deletions:
+                api_client.delete_transaction(del_id)
+                del_count += 1
+            
+            if mod_count > 0 or del_count > 0:
+                st.session_state.pending_deletions = set()
+                st.toast(f"✅ Saved {mod_count} modifications and deleted {del_count} records!", icon="💾")
+                st.cache_data.clear()
                 time.sleep(0.5) 
                 st.rerun()
             else:

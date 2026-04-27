@@ -1,15 +1,7 @@
-import csv
-import logging
-from datetime import datetime
-from pathlib import Path
 import streamlit as st
-from auto_bi.utils.config import GOLD_FILE
+from datetime import datetime
+from api_client import api_client
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
-
-DATA_PATH = Path(GOLD_FILE)
 DATE_FORMAT = "%Y-%m-%d"
 
 def restore_state_from_url():
@@ -19,21 +11,20 @@ def restore_state_from_url():
     if "page" in params and "current_page" not in st.session_state:
         st.session_state["current_page"] = params["page"]
     
-    # Global toggles
-    if "adv" in params:
+    # Global toggles - Only set if not already in session state (to avoid widget conflicts)
+    if "adv" in params and "show_adv_global" not in st.session_state:
         st.session_state["show_adv_global"] = params["adv"].lower() == "true"
-    if "review" in params:
+    if "review" in params and "needs_review" not in st.session_state:
         st.session_state["needs_review"] = params["review"].lower() == "true"
         
     # Filters
-    if "tipology" in params:
+    if "tipology" in params and "selected_tipology" not in st.session_state:
         st.session_state["selected_tipology"] = params["tipology"]
-    if "cats" in params:
-        # st.query_params.get_all returns a list of values for the same key
+    if "cats" in params and "cat_ms" not in st.session_state:
         st.session_state["cat_ms"] = params.get_all("cats")
-    if "start" in params:
+    if "start" in params and "selected_start_date" not in st.session_state:
         st.session_state["selected_start_date"] = params["start"]
-    if "end" in params:
+    if "end" in params and "selected_end_date" not in st.session_state:
         st.session_state["selected_end_date"] = params["end"]
 
 def sync_url_from_state():
@@ -137,37 +128,32 @@ def apply_theme():
     st.markdown(css, unsafe_allow_html=True)
 
 def parse_date(value: str):
+    if not value: return None
+    if isinstance(value, datetime): return value.date()
     try:
         return datetime.strptime(value, DATE_FORMAT).date()
     except (TypeError, ValueError):
         return None
 
 @st.cache_data
-def load_data(path: Path = DATA_PATH):
-    if not path.exists():
-        return []
-    with path.open(newline="", encoding="utf-8") as fp:
-        reader = csv.DictReader(fp)
-        rows = list(reader)
-
-    EXPECTED_FIELDS = ["reasoning", "original_operation", "original_details", "category", "merchant", "amount", "tipology", "date"]
-    for row in rows:
-        # Ensure all UI-critical fields exist to prevent st.data_editor column hiding
-        for field in EXPECTED_FIELDS:
-            if field not in row:
-                row[field] = ""
-                
-        if "amount" in row:
-            try:
-                row["amount"] = float(row["amount"])
-            except (ValueError, TypeError):
-                pass
-        if "confidence" in row:
-            try:
-                row["confidence"] = float(row["confidence"])
-            except (ValueError, TypeError):
-                row["confidence"] = 0.0
-        else:
-            row["confidence"] = 0.0
-        row["parsed_date"] = parse_date(row.get("date"))
-    return rows
+def load_data():
+    transactions = api_client.get_transactions()
+    
+    # Map API fields to UI fields
+    mapped_rows = []
+    for tx in transactions:
+        row = {
+            "original_msg_id": tx.get("id"),
+            "amount": tx.get("amount"),
+            "date": tx.get("date"),
+            "tipology": tx.get("tipology"),
+            "category": tx.get("category_id"),
+            "merchant": tx.get("merchant_id"),
+            "original_operation": tx.get("original_operation"),
+            "original_details": tx.get("original_details"),
+            "reasoning": tx.get("ai_reasoning"),
+            "confidence": tx.get("confidence", 0.0),
+            "parsed_date": parse_date(tx.get("date"))
+        }
+        mapped_rows.append(row)
+    return mapped_rows

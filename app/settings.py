@@ -2,10 +2,7 @@ import streamlit as st
 import os
 import tempfile
 import logging
-from auto_bi.utils.bank_profile import (
-    load_bank_profile, save_bank_profile, ColumnMapping, BankProfile,
-    get_active_profile_name, set_active_profile_name, list_profiles
-)
+from api_client import api_client
 from auto_bi.core.configurator import auto_configure_bank_profile
 from auto_bi.core.rule_assistant import interpret_user_rule
 from auto_bi.core.noise_assistant import suggest_cleaning_patterns
@@ -13,17 +10,45 @@ import re
 import json
 import time
 from auto_bi.core.recovery import run_error_recovery
+# Keep some constants if needed, but profiles should come from API
 from auto_bi.utils.config import EXTRACTION_CACHE, MERCHANT_CATALOGUE
 
 logger = logging.getLogger(__name__)
 def render_settings():
     # --- CORE INITIALIZATION ---
-    # Force clear cache to handle background/manual profile updates
-    load_bank_profile.cache_clear()
+    profiles_raw = api_client.get_profiles()
+    all_profiles = [p["name"] for p in profiles_raw]
+    active_name = st.session_state.get("active_profile_name")
     
-    active_name = get_active_profile_name()
-    profile = load_bank_profile(active_name)
-    all_profiles = list_profiles()
+    # Simple profile object for UI (using first one if none selected)
+    profile_data = next((p for p in profiles_raw if p["name"] == active_name), None)
+    if not profile_data and profiles_raw:
+        profile_data = profiles_raw[0]
+        active_name = profile_data["name"]
+    
+    # Mocking a BankProfile-like object for compatibility with the rest of the script
+    class ProfileProxy:
+        def __init__(self, data):
+            self.profile_name = data.get("name", "Default")
+            self.config = data.get("config", {})
+            self.skip_rows = self.config.get("skip_rows", 0)
+            self.date_format = self.config.get("date_format", "%d/%m/%Y")
+            self.column_mapping = type('CM', (), self.config.get("column_mapping", {
+                "date": "Data", "operation": "Descrizione", "amount": "Importo", "details": "Dettagli", "category_hint": ""
+            }))
+            self.outgoing_categories = self.config.get("outgoing_categories", [])
+            self.incoming_categories = self.config.get("incoming_categories", [])
+            self.incoming_keywords = self.config.get("incoming_keywords", [])
+            self.cleaning_patterns = self.config.get("cleaning_patterns", [])
+            self.rules_memory = self.config.get("rules_memory", [])
+            self.config_model = self.config.get("config_model", "gemma4:e4b")
+            self.classification_model = self.config.get("classification_model", "gemma4:e4b")
+            self.fast_model_id = self.config.get("fast_model_id", "gemma4:e4b")
+        
+        def model_dump(self):
+            return {"name": self.profile_name, "config": self.config}
+
+    profile = ProfileProxy(profile_data if profile_data else {})
     
     # AI Discovery state override
     is_discovery_mode = "pending_profile" in st.session_state
@@ -52,7 +77,7 @@ def render_settings():
                                      options=all_profiles, 
                                      index=p_idx)
             if new_active and new_active != active_name:
-                set_active_profile_name(new_active)
+                st.session_state["active_profile_name"] = new_active
                 st.rerun()
             
         if st.button("➕ Create New Profile", width='stretch'):
@@ -63,8 +88,8 @@ def render_settings():
                 new_name = st.text_input("Profile Name (e.g. My Bank)")
                 if st.form_submit_button("Create"):
                     if new_name:
-                        set_active_profile_name(new_name)
-                        save_bank_profile(BankProfile(profile_name=new_name))
+                        api_client.create_profile(new_name)
+                        st.session_state["active_profile_name"] = new_name
                         del st.session_state["show_new_profile_dialog"]
                         st.rerun()
 
@@ -124,8 +149,8 @@ def render_settings():
             st.code(f"Columns: {pending.column_mapping.date}, {pending.column_mapping.operation}, {pending.column_mapping.amount}\nFormat: {pending.date_format} | Skip rows: {pending.skip_rows}")
             
             if st.button("✅ Save & Apply This Configuration", type="primary", width='stretch'):
-                save_bank_profile(pending)
-                set_active_profile_name(pending.profile_name)
+                api_client.create_profile(pending.profile_name, pending.model_dump().get("config"))
+                st.session_state["active_profile_name"] = pending.profile_name
                 del st.session_state["pending_profile"]
                 st.success("Config saved and active!")
                 st.rerun()
@@ -168,35 +193,27 @@ def render_settings():
                 )
             with col_res2:
                 if st.button("⚠️ Reset Active Profile", type="secondary", use_container_width=True):
-                    new_p = BankProfile(profile_name=active_name)
-                    save_bank_profile(new_p)
+                    api_client.create_profile(active_name, {})
                     st.toast("Profile reset!")
                     st.rerun()
             
             # --- NEW: RECOVERY BUTTON ---
-            if st.button("🚑 Deep Recovery (Retry Errors)", use_container_width=True, help="Retry processing all 'Uncategorized' or failed transactions."):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                def update_recovery_p(current, total):
-                    p = min(current / total, 1.0) if total > 0 else 1.0
-                    progress_bar.progress(p)
-                    status_text.write(f"**Recovery Progress:** {current}/{total} records")
-                
+            if st.button("🚑 Deep Recovery (Retry Errors)", use_container_width=True, help="Retry processing all 'Uncategorized' transactions using the latest rules."):
                 with st.spinner("Analyzing and fixing errors..."):
-                    import importlib
-                    import auto_bi.core.recovery
-                    importlib.reload(auto_bi.core.recovery)
-                    from auto_bi.core.recovery import run_error_recovery
-                    
-                    fixed, total = run_error_recovery(progress_callback=update_recovery_p)
-                    if fixed > 0:
-                        st.success(f"✨ Success! Recovered {fixed} / {total} transactions.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    elif total > 0:
-                        st.warning(f"Analyzed {total} errors but could not improve classification. Try adding a new rule!")
+                    res = api_client.run_recovery()
+                    if res and res.get("status") == "success":
+                        fixed = res.get("fixed", 0)
+                        total = res.get("total", 0)
+                        if fixed > 0:
+                            st.success(f"✨ Success! Recovered {fixed} / {total} transactions.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        elif total > 0:
+                            st.warning(f"Analyzed {total} errors but could not improve classification. Try adding a manual rule first!")
+                        else:
+                            st.info("No 'Uncategorized' transactions found to recover.")
                     else:
-                        st.info("No errors found to recover.")
+                        st.error("Failed to run recovery service. Check logs.")
         else:
             st.divider()
             st.info("💡 Tip: Once you create a bank profile, maintenance and export tools will appear here.")
@@ -247,10 +264,9 @@ def render_settings():
                 if not display_profile.profile_name:
                     st.error("Profile name is required!")
                 else:
-                    # Pass active_name as old_name to support renaming
-                    save_bank_profile(display_profile, old_name=active_name)
+                    api_client.create_profile(display_profile.profile_name, display_profile.config)
                     if is_discovery_mode:
-                        set_active_profile_name(display_profile.profile_name)
+                        st.session_state["active_profile_name"] = display_profile.profile_name
                         del st.session_state["pending_profile"]
                     st.toast("Settings Saved!")
                     time.sleep(0.5)
@@ -267,7 +283,7 @@ def render_settings():
                     with st.spinner("Compiling..."):
                         compiled = interpret_user_rule(new_rule)
                         profile.rules_memory.append(compiled)
-                        save_bank_profile(profile)
+                        api_client.create_profile(profile.profile_name, profile.config)
                         st.toast("Logic updated!")
                         st.rerun()
             
@@ -278,7 +294,7 @@ def render_settings():
                 r1.code(rule)
                 if r2.button("🗑️", key=f"delr_{i}"):
                     profile.rules_memory.pop(i)
-                    save_bank_profile(profile)
+                    api_client.create_profile(profile.profile_name, profile.config)
                     st.rerun()
 
             st.divider()
@@ -288,7 +304,7 @@ def render_settings():
                 profile.classification_model = st.text_input("Classification Model", profile.classification_model)
                 profile.fast_model_id = st.text_input("Fast Model (Multi-Model)", profile.fast_model_id)
                 if st.button("Sync Models", width='stretch'):
-                    save_bank_profile(profile)
+                    api_client.create_profile(profile.profile_name, profile.config)
                     st.toast("Syncing...")
             else:
                 st.info("Enable Advanced Settings in the sidebar to modify models.")
