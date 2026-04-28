@@ -17,7 +17,9 @@ The repository has been modernized into a robust **FastAPI + Streamlit** archite
 | **Frontend** | Streamlit | Interactive dashboard and explorer for data visualization. |
 | **Database** | PostgreSQL + pgvector | Relational storage with vector support for semantic search. |
 | **ORM & Migrations** | SQLAlchemy + Alembic | Type-safe database interaction and version-controlled schema evolution. |
+| **Task Queue** | Celery + Redis | Asynchronous background processing for long-running AI tasks. |
 | **AI Engine** | Ollama + Instructor | Local LLM orchestration (Gemma/Qwen) with structured JSON output. |
+| **Search Engine** | Tavily + DuckDuckGo | Real-time web search for merchant identification and enrichment. |
 | **Dependency Mgmt** | Poetry | Deterministic package management and environment isolation. |
 | **Containerization** | Docker | Standardized deployment and environment consistency. |
 | **PDF Extraction** | pdfplumber | Reliable and precise text extraction from bank statements. |
@@ -30,6 +32,12 @@ The system implements a multi-tier classification strategy for maximum precision
 1.  **Tier 1: Regex Automation**: Instant matching for known merchants using dynamic, user-defined regex rules.
 2.  **Tier 2: Semantic Database Search**: Uses **pgvector** and embeddings to find similar historical transactions or known merchants.
 3.  **Tier 3: AI Batch Classification**: Deep reasoning via local LLMs (Gemma 4 / Qwen) with parallelized web searches (Tavily/DuckDuckGo) for real-time merchant identification.
+
+### 🔄 Continuous Learning Loop
+The system is designed to improve with every use:
+*   **Automatic Rule Learning**: When you correct a transaction, the system suggests and saves a new **Regex Rule** to handle similar transactions instantly in the future.
+*   **Merchant Memory**: Every identified merchant is stored with its **vector embedding**, allowing for increasingly accurate semantic matching without repeated AI calls.
+*   **Refinement**: Over time, the system shifts from slow AI-based classification to near-instant database lookups.
 
 ---
 
