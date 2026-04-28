@@ -20,3 +20,15 @@ vercel-deployment: Deploy su Vercel.
 
 
 Utilizzando using-superpowers e 
+
+Descrivi la struttura della repository, per ciascun file dimmi cosa fa.
+Segui questa struttura:
+- cartella1
+     - file1.py : "fa questa cosa."
+          - Funzione 1: "prende in input: [...], fa questo processamento e restituisce [...]"
+          - Funzione 2: "prende in input: [...], fa questo processamento e restituisce [...]"
+          - Funzione 3: "prende in input: [...], fa questo processamento e restituisce [...]"
+     - file2.py : " fa quest'altra cosa."
+          - Funzione 1: "prende in input: [...], fa questo processamento e restituisce [...]"
+          - Funzione 2: "prende in input: [...], fa questo processamento e restituisce [...]"
+Crea un file md apposta

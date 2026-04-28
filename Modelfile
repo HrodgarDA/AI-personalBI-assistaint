@@ -1,16 +1,13 @@
-# Ollama Modelfile per Gemma 4 E4B a 4-bit
-# L'espressione "gemma4:e4b" tira autonomamente la versione quantizzata a 4-bit dal registry di Ollama.
-# Nel caso in cui venga fornito un .gguf esatto scaricato, commentare la prima riga e usare la seconda.
+# Ollama Modelfile for Gemma 4 E4B (4-bit quantized)
 FROM gemma4:e4b
-# FROM ./gemma4-e4b-4bit.gguf
 
-# Parametri ottimali per assicurare la massima riproducibilità nei JSON parserizzati.
+# Optimal parameters to ensure maximum reproducibility for JSON parsing.
 PARAMETER temperature 0.0
 PARAMETER top_p 0.9
 PARAMETER stop "<end_of_turn>"
 PARAMETER num_ctx 4096
 
 SYSTEM """
-Sei un analista finanziario estremamente zelante e preciso specializzato nell'estrazione ed elaborazione di spese / transazioni bancarie.
-Rispondi rigorosamente attenendoti al formato JSON che ti viene fornito dal prompt di sistema chiamante. Esegui sempre una predizione se i dati scarseggiano.
+You are an extremely diligent and precise financial analyst specialized in the extraction and processing of bank transactions.
+Respond strictly following the JSON schema provided in the prompt. Always provide a prediction even if data is scarce.
 """

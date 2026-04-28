@@ -1,20 +1,20 @@
 #!/bin/bash
 
-# Naviga nella directory dove risiede questo script
+# Navigate to the directory where this script resides
 cd "$(dirname "$0")"
 
 echo "------------------------------------------"
 echo "🚀 RESTARTING PERSONAL BI ASSISTANT..."
 echo "------------------------------------------"
 
-# 1. Chiude i processi streamlit attivi per questo progetto
+# 1. Terminate active streamlit processes for this project
 echo "🧹 Cleaning up existing processes..."
-pkill -f "streamlit run app/webapp.py"
+pkill -f "streamlit run frontend/webapp.py"
 
-# 2. Breve attesa per assicurarsi che le porte siano libere
+# 2. Brief pause to ensure ports are released
 sleep 1
 
-# 3. Lancio della nuova istanza tramite l'ambiente virtuale locale
+# 3. Launch the new instance using the local virtual environment
 echo "📈 Launching new instance..."
 echo "The browser should open automatically in a few seconds."
-./.venv/bin/python -m streamlit run app/webapp.py
+./.venv/bin/python -m streamlit run frontend/webapp.py
